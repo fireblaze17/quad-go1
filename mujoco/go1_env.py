@@ -7,9 +7,14 @@ from gymnasium import spaces
 class Go1Env(gym.Env):
     def __init__(
         self,
+        task="stand",
         reset_joint_noise=0.1,
         reset_velocity_noise=0.1,
     ):
+        if task not in ["stand", "walk"]:
+            raise ValueError("task must be either 'stand' or 'walk'.")
+
+        self.task = task
         self.model = mujoco.MjModel.from_xml_path(
             r"c:\Learning code\mujoco_menagerie\unitree_go1\scene.xml"
         )
@@ -64,6 +69,64 @@ class Go1Env(gym.Env):
 
         return np.dot(body_z_axis, world_z_axis)
 
+    def _reward_terms(self, action, terminated):
+        base_height = self.data.qpos[2]
+        upright_score = self._upright_score()
+        alive_reward = 0.0 if terminated else 1.0
+        upright_reward = max(0.0, upright_score)
+        control_penalty = 0.01 * np.sum(np.square(action))
+
+        joint_angles = self.data.qpos[7:]
+        pose_error = joint_angles - self.home_joint_angles
+        pose_penalty = 0.1 * np.sum(np.square(pose_error))
+
+        base_xy_position = self.data.qpos[0:2]
+        position_penalty = 0.5 * np.sum(np.square(base_xy_position))
+
+        base_xy_velocity = self.data.qvel[0:2]
+        velocity_penalty = 0.1 * np.sum(np.square(base_xy_velocity))
+
+        base_angular_velocity = self.data.qvel[3:6]
+        angular_velocity_penalty = 0.05 * np.sum(np.square(base_angular_velocity))
+
+        forward_velocity = self.data.qvel[0]
+        forward_reward = max(0.0, forward_velocity)
+
+        return {
+            "base_height": base_height,
+            "upright_score": upright_score,
+            "alive_reward": alive_reward,
+            "upright_reward": upright_reward,
+            "control_penalty": control_penalty,
+            "pose_penalty": pose_penalty,
+            "position_penalty": position_penalty,
+            "velocity_penalty": velocity_penalty,
+            "angular_velocity_penalty": angular_velocity_penalty,
+            "forward_velocity": forward_velocity,
+            "forward_reward": forward_reward,
+        }
+
+    def _stand_reward(self, terms):
+        return (
+            terms["alive_reward"]
+            + terms["upright_reward"]
+            - terms["control_penalty"]
+            - terms["pose_penalty"]
+            - terms["position_penalty"]
+            - terms["velocity_penalty"]
+            - terms["angular_velocity_penalty"]
+        )
+
+    def _walk_reward(self, terms):
+        return (
+            terms["alive_reward"]
+            + terms["upright_reward"]
+            + terms["forward_reward"]
+            - terms["control_penalty"]
+            - 0.02 * terms["pose_penalty"]
+            - terms["angular_velocity_penalty"]
+        )
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
@@ -105,44 +168,18 @@ class Go1Env(gym.Env):
 
         obs = self._get_obs()
         base_height = self.data.qpos[2]
-        upright_score = self._upright_score()
         terminated = base_height < 0.1755
 
-        alive_reward = 0.0 if terminated else 1.0
-        upright_reward = max(0.0, upright_score)
-        control_penalty = 0.01 * np.sum(np.square(action))
-        joint_angles = self.data.qpos[7:]
-        pose_error = joint_angles - self.home_joint_angles
-        pose_penalty = 0.1 * np.sum(np.square(pose_error))
-        base_xy_position = self.data.qpos[0:2]
-        position_penalty = 0.5 * np.sum(np.square(base_xy_position))
-        base_xy_velocity = self.data.qvel[0:2]
-        velocity_penalty = 0.1 * np.sum(np.square(base_xy_velocity))
-        base_angular_velocity = self.data.qvel[3:6]
-        angular_velocity_penalty = 0.05 * np.sum(np.square(base_angular_velocity))
-        reward = (
-            alive_reward
-            + upright_reward
-            - control_penalty
-            - pose_penalty
-            - position_penalty
-            - velocity_penalty
-            - angular_velocity_penalty
-        )
+        terms = self._reward_terms(action, terminated)
+        if self.task == "stand":
+            reward = self._stand_reward(terms)
+        else:
+            reward = self._walk_reward(terms)
 
         truncated = self.step_count >= self.max_steps
-        info = {
-            "base_height": base_height,
-            "upright_score": upright_score,
-            "alive_reward": alive_reward,
-            "upright_reward": upright_reward,
-            "control_penalty": control_penalty,
-            "pose_penalty": pose_penalty,
-            "position_penalty": position_penalty,
-            "velocity_penalty": velocity_penalty,
-            "angular_velocity_penalty": angular_velocity_penalty,
-            "ctrl": ctrl,
-        }
+        info = terms
+        info["task"] = self.task
+        info["ctrl"] = ctrl
 
         return obs, reward, terminated, truncated, info
 
