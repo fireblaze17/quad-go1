@@ -16,12 +16,49 @@ The goal is to build a clean robotics ML stack:
 ## Current Status
 
 ```text
-Status: building the Project Chrono foundation
+Status: first Chrono physics demo working
 ```
 
-Next steps:
+## Milestone 1: Basic Chrono Physics Demo
 
-1. Create a Chrono/PyChrono environment.
-2. Run a minimal falling-body or ground-contact simulation.
-3. Add visualization.
-4. Start building/importing the quadruped model.
+The first Chrono demo is implemented in:
+
+```text
+chrono_demo.py
+```
+
+It creates:
+
+```text
+Chrono physics system
+Y-up gravity
+fixed ground body
+dynamic falling box
+Bullet collision system
+Irrlicht visualization window
+```
+
+The box falls onto the ground, contacts are detected, and the box settles at the
+expected height.
+
+Important Chrono setup details:
+
+```text
+ChSystemNSC
+SetGravityY()
+SetCollisionSystemType(Type_BULLET)
+ChContactMaterialNSC
+AddBody(...)
+DoStepDynamics(...)
+ChVisualSystemIrrlicht
+```
+
+This milestone proves that basic Chrono physics, contact, and visualization are
+working before adding robots or learning code.
+
+## Next Steps
+
+1. Clean up the Chrono demo code.
+2. Add a more interesting terrain demo.
+3. Start building/importing the quadruped model.
+4. Wrap the Chrono simulation in a Gymnasium environment.
