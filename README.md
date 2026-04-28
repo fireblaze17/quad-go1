@@ -510,3 +510,43 @@ and potentially publishable as a contribution.
 Before any training can start, `step()` needs:
 - A standing/walking reward function (trunk height, upright score, motor penalty)
 - Fall termination (`terminated = trunk_y < _TERM_HEIGHT`)
+
+---
+
+## Fix: Robot Spawning Sideways
+
+The Go1 URDF follows ROS convention and is defined in **Z-up** coordinates.
+Chrono's world is **Y-up**. With an identity quaternion the robot's spine pointed
+along Chrono's X or Z axis — spawning horizontally and falling sideways.
+
+Fixed by rotating the root pose -90° around X when setting the initial pose,
+the same rotation applied to the SCM terrain reference frame:
+
+```python
+parser.SetRootInitPose(
+    chrono.ChFramed(
+        chrono.ChVector3d(0, _SPAWN_HEIGHT, 0),
+        chrono.QuatFromAngleX(-math.pi / 2),  # URDF Z-up → Chrono Y-up
+    )
+)
+```
+
+This maps the URDF's Z-up "standing" orientation onto Chrono's Y-up world so
+the robot spawns with its legs pointing down and trunk upright.
+
+---
+
+## Cleanup: Removed Redundant Scripts
+
+The following one-off development scripts were removed once `go1_env.py` was
+working:
+
+```text
+debug_go1_physics.py    — manual physics step debugger
+inspect_go1_contacts.py — contact reporting script
+load_go1_urdf.py        — standalone URDF load check
+```
+
+All functionality they verified is now covered by the Gymnasium env and
+`view_env.py`. `view_go1_urdf.py`, `chrono_demo.py`, and `chrono_go1_soil.py`
+are retained as milestone reference scripts.
