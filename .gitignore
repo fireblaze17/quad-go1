@@ -13,3 +13,7 @@ videos/
 runs/
 logs/
 
+*.zip
+*.mp4
+*.avi
+*.mov

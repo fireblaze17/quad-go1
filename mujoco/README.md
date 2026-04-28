@@ -1,11 +1,10 @@
-# Unitree Go1 MuJoCo RL Project
+# Unitree Go1 MuJoCo Reference
 
-This project is a staged robotics ML project using the Unitree Go1 quadruped in
-MuJoCo. The long-term goal is to build from basic simulation toward locomotion,
-rollout data collection, a learned world model, and eventually hierarchical
-control.
+This folder is the old MuJoCo baseline. The active project has moved to Project
+Chrono, but these files stay as reference for reward shaping, Menagerie model
+values, and the first successful standing-policy workflow.
 
-Current milestone:
+Historical milestone:
 
 ```text
 Robust standing policy trained and evaluated successfully.
@@ -54,7 +53,8 @@ Go1Env(task="walk")
 train_stand.py
 ```
 
-Trains the PPO standing policy.
+Trains the PPO standing policy. Generated `.zip` policy artifacts are ignored
+and are not kept in git.
 
 ```text
 view_trained_policy.py
@@ -79,14 +79,6 @@ calculate_fall_height.py
 ```
 
 Calculates the fall-height threshold from the official Go1 home keyframe.
-
-```text
-train_walk.py
-view_walk_policy.py
-evaluate_walk.py
-```
-
-Placeholder files for the next milestone: forward walking.
 
 ## What Was Built
 
@@ -171,29 +163,15 @@ small pose penalty
 angular velocity penalty
 ```
 
-The next step is to fill in the walking training/view/evaluation scripts and
-train:
-
-```text
-go1_walk_policy_v1.zip
-```
+The old walking placeholder scripts were removed during cleanup. New walking
+work should happen in the Chrono env unless this MuJoCo baseline is deliberately
+revived for comparison.
 
 ## Standing Policies
 
-First successful standing policy:
-
-```text
-go1_stand_policy_v1.zip
-```
-
-Current main robust standing policy:
-
-```text
-go1_stand_policy_v2.zip
-go1_stand_policy.zip
-```
-
-`go1_stand_policy.zip` is currently a copy of `v2`.
+The first successful standing policy artifacts were removed from git during
+cleanup. Keep regenerated `.zip` files local or store them through an artifact
+system, not in the repo.
 
 ## Current Result
 
@@ -214,15 +192,10 @@ fall rate: 0.0%
 The policy survived the full evaluation episodes under reset noise and is the
 current standing baseline.
 
-## Video Comparison
+## Videos
 
-Before training, random actions do not produce stable behavior:
-
-[Untrained random policy](media/untrained_random.mp4)
-
-After training, the PPO standing policy keeps the Go1 upright:
-
-[Trained standing policy v2](media/standing_policy_v2.mp4)
+Generated videos were removed from git during cleanup. Keep rollout videos local
+or publish them outside the source tree when they are needed for demos.
 
 ## Next Milestones
 

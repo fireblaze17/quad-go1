@@ -19,6 +19,4 @@ logs/
 *.mp4
 *.avi
 *.mov
-
-!media/
-!media/*.mp4
+*.zip

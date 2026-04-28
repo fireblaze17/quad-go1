@@ -1,11 +1,18 @@
+"""Small Chrono SCM terrain smoke test.
+
+This script keeps the deformable-soil setup separate from the Go1 Gymnasium env.
+It is useful when checking that PyChrono, Irrlicht, and SCMTerrain are installed
+correctly before debugging robot-specific behavior.
+"""
+
+import math
+
 import pychrono as chrono
 import pychrono.irrlicht as irr
 import pychrono.vehicle as veh
-import math
 
 
 TIME_STEP = 0.002
-
 TERRAIN_LENGTH = 6.0
 TERRAIN_WIDTH = 4.0
 TERRAIN_DELTA = 0.04
@@ -21,8 +28,8 @@ def create_system():
 def create_soil(system):
     terrain = veh.SCMTerrain(system)
 
-    # SCMTerrain is Z-up by default. The rest of this demo uses Y-up, so rotate
-    # the terrain frame by -90 degrees about X.
+    # SCMTerrain defaults to Z-up. Rotate it so this smoke test matches the
+    # Y-up convention used by go1_env.py.
     terrain.SetReferenceFrame(
         chrono.ChCoordsysd(
             chrono.ChVector3d(0, 0, 0),
@@ -43,7 +50,6 @@ def create_soil(system):
 
     terrain.SetPlotType(veh.SCMTerrain.PLOT_SINKAGE, 0, 0.1)
     terrain.Initialize(TERRAIN_LENGTH, TERRAIN_WIDTH, TERRAIN_DELTA)
-
     return terrain
 
 
@@ -52,19 +58,10 @@ def add_test_box(system):
     material.SetFriction(0.8)
     material.SetRestitution(0.0)
 
-    box = chrono.ChBodyEasyBox(
-        0.4,
-        0.4,
-        0.4,
-        800,
-        True,
-        True,
-        material,
-    )
+    box = chrono.ChBodyEasyBox(0.4, 0.4, 0.4, 800, True, True, material)
     box.SetPos(chrono.ChVector3d(0, 1.0, 0))
     box.GetVisualShape(0).SetColor(chrono.ChColor(0.1, 0.4, 1.0))
     system.AddBody(box)
-
     return box
 
 
@@ -85,7 +82,6 @@ def main():
     terrain = create_soil(system)
     box = add_test_box(system)
     vis = create_visualizer(system)
-
     step = 0
 
     while vis.Run():

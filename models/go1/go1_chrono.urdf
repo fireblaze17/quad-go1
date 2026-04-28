@@ -471,7 +471,7 @@
       <!-- <material name="orange"/> -->
     </visual>
     <collision>
-      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.08 0"/>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.045 0"/>
       <geometry>
         <cylinder length="0.04" radius="0.046"/>
       </geometry>
@@ -684,7 +684,7 @@
       <!-- <material name="orange"/> -->
     </visual>
     <collision>
-      <origin rpy="1.5707963267948966 0 0" xyz="0 0.08 0"/>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0.045 0"/>
       <geometry>
         <cylinder length="0.04" radius="0.046"/>
       </geometry>
@@ -897,7 +897,7 @@
       <!-- <material name="orange"/> -->
     </visual>
     <collision>
-      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.08 0"/>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.045 0"/>
       <geometry>
         <cylinder length="0.04" radius="0.046"/>
       </geometry>
@@ -1110,7 +1110,7 @@
       <!-- <material name="orange"/> -->
     </visual>
     <collision>
-      <origin rpy="1.5707963267948966 0 0" xyz="0 0.08 0"/>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0.045 0"/>
       <geometry>
         <cylinder length="0.04" radius="0.046"/>
       </geometry>
