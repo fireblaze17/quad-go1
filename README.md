@@ -164,12 +164,20 @@ fall rate: 0.0%
 The policy survived the full evaluation episodes under reset noise and is the
 current standing baseline.
 
+## Video Comparison
+
+Before training, random actions do not produce stable behavior:
+
+[Untrained random policy](media/untrained_random.mp4)
+
+After training, the PPO standing policy keeps the Go1 upright:
+
+[Trained standing policy v2](media/standing_policy_v2.mp4)
+
 ## Next Milestones
 
-1. Record standing policy videos.
-2. Train a forward walking policy.
-3. Train turning or backward-walking policies.
-4. Collect rollout data from multiple behaviors.
-5. Train a world model on `(obs, action, next_obs)` transitions.
-6. Use the world model later for planning or hierarchical control experiments.
-
+1. Train a forward walking policy.
+2. Train turning or backward-walking policies.
+3. Collect rollout data from multiple behaviors.
+4. Train a world model on `(obs, action, next_obs)` transitions.
+5. Use the world model later for planning or hierarchical control experiments.
