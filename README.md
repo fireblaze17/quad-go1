@@ -15,21 +15,20 @@ Project Chrono robotics simulation and ML project for a Unitree Go1-style quadru
 ```text
 Stage 1 — standing policy, flat terrain, fixed friction=0.8
 
-Active reward:
-  alive_bonus(+1.0) + upright_score(×1.0) − pose_penalty(×0.15) − control_penalty(×0.01) − ang_vel_penalty(×0.05)
+Active reward (reset — ADR-008):
+  alive_bonus(+1.0)   ← baseline only; add one term at a time after evaluation
 
-Solved so far:
+Solved:
   ✓ Chrono simulation + Y-up world
   ✓ Chrono-specific Go1 URDF (trunk as free root)
   ✓ Hip joint axis bug (hips now visible to pose penalty)
-  ✓ height_score → terrain-agnostic alive_bonus
-  ✓ Slow-sink fixed (pose_weight raised 0.1 → 0.15)
-  ✓ Motor ramp removed (DoAssembly drives joints to home before first physics step — zero overhead)
+  ✓ Motor ramp removed (DoAssembly — zero overhead)
+  ✓ Spawn height 0.27 m — no free-fall, no impact pitch
+  ✓ Reward system reset (ADR-008) — previous terms developed under invalid conditions
 
 Pending:
-  ✗ Retrain with pose_weight=0.15 + no-ramp spawn
-  ✗ position_penalty (0.5 × Σxy²) — one term at a time after retrain
-  ✗ xy_vel_penalty (0.1 × Σxy_vel²)
+  ✗ Train on alive_bonus only — confirm survival_rate=1.0
+  ✗ Add upright_score, evaluate, then add pose_penalty, etc. (one term per run)
 ```
 
 ## Project Shape
@@ -92,25 +91,17 @@ All joints use `ActuationType_POSITION`. Zero action = MuJoCo Menagerie home pos
 
 ### ADR-003: Standing Reward
 
-**Status:** Accepted — retrain pending
+**Status:** Building from scratch — see [docs/training_roadmap.md](docs/training_roadmap.md)
 
-**Context:** One term added per training run, evaluated before adding the next.
+**Decision:** `alive_bonus = +1.0` per surviving step. One term added per training run
+after full evaluation gate (`survival_rate=1.0`).
 
-**Decision:**
-
-```python
-reward = alive_bonus + upright_score - pose_penalty - control_penalty - ang_vel_penalty
-```
-
-| Term | Weight | Problem solved |
-|---|---|---|
-| `alive_bonus` | +1.0/step | terrain-agnostic positive signal (no Y=0 assumption) |
-| `upright_score` | ×1.0 | robot pitched forward |
-| `pose_penalty` | ×0.15 | legs folded under trunk; slow height sink |
-| `control_penalty` | ×0.01 | policy saturated joint targets |
-| `ang_vel_penalty` | ×0.05 | trunk spinning and rotational jitter |
-
-Pending (one at a time): `position_penalty` (×0.5), `xy_vel_penalty` (×0.1).
+**Key tradeoff — terrain generalization:** A height score encodes a Y=0 ground
+assumption. On SCM deformable terrain the surface varies — a robot correctly
+holding its joints while sinking into soft soil would be penalised. `alive_bonus`
+is terrain-agnostic: any non-terminated step earns +1.0 regardless of absolute
+trunk height. This is the reason SCM fine-tuning (Stage 4) does not require a
+reward redesign.
 
 ---
 

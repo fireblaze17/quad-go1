@@ -35,9 +35,9 @@ _TERRAIN_LENGTH = 6.0
 _TERRAIN_WIDTH = 4.0
 _TERRAIN_DELTA = 0.04
 
-# At home angles (hip=0, thigh=0.9, calf=-1.8) the leg length trunk→foot is ~0.27 m.
-# Spawn trunk at 0.35 m so feet clear the ground by ~0.08 m after assembly.
-_SPAWN_HEIGHT = 0.35  # trunk root height; DoAssembly drives legs to home before first step
+# At home angles (hip=0, thigh=0.9, calf=-1.8) the Menagerie trunk height is 0.27 m.
+# Spawn here so DoAssembly places feet at ~ground level — no free-fall, no impact pitch.
+_SPAWN_HEIGHT = 0.27  # trunk root height; DoAssembly drives legs to home before first step
 _TERM_HEIGHT = 0.15
 _UPRIGHT_WEIGHT         = 1.0
 _MIN_UPRIGHT_ALIGNMENT  = 0.75

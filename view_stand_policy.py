@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
     parser.add_argument("--friction-min", type=float, default=0.8)
     parser.add_argument("--friction-max", type=float, default=0.8)
-    parser.add_argument("--max-steps", type=int, default=1500)
+    parser.add_argument("--max-steps", type=int, default=1000)
     return parser.parse_args()
 
 

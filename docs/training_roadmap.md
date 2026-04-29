@@ -10,19 +10,17 @@ Git history records what was tried. These docs record only the current rational 
 Go1Env(terrain="flat", enable_motors=True, friction_range=(0.8, 0.8))
 ```
 
-Active reward:
+Active reward: **reset — see ADR-008.** Building from scratch with a single term.
 
 ```python
-reward = alive_bonus(+1.0) + upright_score(×1.0) − pose_penalty(×0.15) − control_penalty(×0.01) − ang_vel_penalty(×0.05)
+reward = alive_bonus(+1.0)   # starting baseline — one term at a time
 ```
-
-Pending (one term per training run): `position_penalty` (×0.5), `xy_vel_penalty` (×0.1)
 
 ---
 
 ## ADR-001: Reward Term 1 — `alive_bonus`
 
-**Status:** Accepted (supersedes `height_score`)
+**Status:** Superseded by ADR-008 (reward reset)
 
 **Context:** The original first term was `height_score = clip((trunk_y − 0.15) / (0.28 − 0.15), 0, 1)`.
 It encodes a Y=0 ground assumption. On SCM deformable terrain the ground surface
@@ -41,7 +39,7 @@ Matches MuJoCo baseline.
 
 ## ADR-002: Reward Term 2 — `upright_score`
 
-**Status:** Accepted
+**Status:** Superseded by ADR-008 (reward reset)
 
 **Context:** With only `alive_bonus`, the policy learned to pitch forward slowly.
 Trunk height stayed above the termination floor but the robot gradually tipped.
@@ -59,7 +57,7 @@ threshold `_MIN_UPRIGHT_ALIGNMENT = 0.75` added alongside.
 
 ## ADR-003: Reward Term 3 — `pose_penalty` (weight=0.15)
 
-**Status:** Accepted
+**Status:** Superseded by ADR-008 (reward reset)
 
 **Context:** After upright score was added, the robot found a new loophole: hold the
 trunk level while legs fold straight down. Trunk sank gradually while `upright_score`
@@ -89,7 +87,7 @@ Result: mean_reward ≈ −3000, 0% survival. The reward had no reachable positi
 
 ## ADR-004: Reward Term 4 — `control_penalty`
 
-**Status:** Accepted
+**Status:** Superseded by ADR-008 (reward reset)
 
 **Context:** After pose penalty was added, evaluation showed `max_abs_action = 1.000` —
 policy saturated all joint targets to maximum offsets, causing jerky motion.
@@ -104,7 +102,7 @@ policy saturated all joint targets to maximum offsets, causing jerky motion.
 
 ## ADR-005: Reward Term 5 — `ang_vel_penalty`
 
-**Status:** Accepted
+**Status:** Superseded by ADR-008 (reward reset)
 
 **Context:** Trunk angular velocity was high in evaluation — robot wobbling rotationally
 while surviving. `obs[10:13]` = trunk angular velocity in world frame.
@@ -161,12 +159,14 @@ system.DoAssembly(1)   # pure constraint satisfaction — no forces, no time int
 self._trunk.SetFixed(False)
 ```
 
-Spawn height 0.35 m. Robot drops a few cm and settles. Zero compute overhead.
+Spawn height `_SPAWN_HEIGHT = 0.27` (Menagerie equilibrium). Feet land at y≈0 after
+assembly — no free-fall, no impact pitch. Zero compute overhead.
 
 **Consequences:**
 - Full retrain required.
 - _Rejected: motor ramp (500 steps)_ — wasted training signal, complicated diagnostics.
 - _Rejected: warm-up loop (50–200 steps)_ — worked but ~5% overhead per episode.
+- _Rejected: spawn at 0.35 m_ — 8 cm free-fall caused forward pitch on impact.
 - _Inspiration:_ [harryzhang1018](https://github.com/harryzhang1018) /
   [SBEL multi-terrain RL](https://github.com/uwsbel/sbel-reproducibility/tree/master/2025/multi-terrain-RL)
   (UW-Madison, 2025) — calls `actuate(home)` before any physics steps. Our `DoAssembly`
@@ -174,16 +174,60 @@ Spawn height 0.35 m. Robot drops a few cm and settles. Zero compute overhead.
 
 ---
 
-## Pending Reward Terms
+## ADR-008: Reward System Reset
 
-To be added one at a time after current retrain:
+**Status:** Active
 
-| Term | Weight | Purpose |
-|---|---|---|
-| `position_penalty` | ×0.5 | penalise XZ drift from spawn point |
-| `xy_vel_penalty` | ×0.1 | penalise horizontal trunk velocity |
-| `foot_height_penalty` | ×0.3 | if hind-leg loophole reappears |
-| `action_rate_penalty` | TBD | if jitter observed after velocity terms |
+**Context:** ADR-001 through ADR-005 were developed under compounding incorrect
+conditions:
+- The hip axis bug (ADR-006) was active during early training runs — hips were
+  invisible to the pose penalty, so policies that appeared to converge were not
+  actually holding the home pose.
+- The sign-flip mistake (sign=+1 for thigh/calf) was introduced and reverted,
+  invalidating any checkpoint trained during that period.
+- Penalty overload (five terms added simultaneously, pose_weight=0.4) caused 0%
+  survival and led to incorrect weight choices.
+- The spawn height was 0.35 m → 8 cm free-fall → forward pitch on impact,
+  meaning all previous training ran with a systematically biased initial condition.
+- No policy trained under the previous reward currently meets the evaluation
+  criteria (`survival_rate=1.0`, `mean_reward≈900`).
+
+**Decision:** Wipe the reward. Start from a single term and add one term per training
+run, with a full evaluation pass before adding the next. Termination conditions
+(height + upright angle + NaN guard) are unchanged.
+
+Starting baseline:
+
+```python
+reward = alive_bonus   # +1.0 per surviving step
+```
+
+**Why `alive_bonus` and not a height score:**
+A height score (`clip((trunk_y − 0.15) / (0.28 − 0.15), 0, 1)`) encodes the
+assumption that the ground surface is at Y=0. On SCM deformable terrain the
+ground varies — a robot correctly holding its joints while sinking 5 cm into
+soft soil would be penalised even though it is doing the right thing. `alive_bonus`
+is terrain-agnostic: any step that does not meet a termination condition earns
++1.0, regardless of absolute trunk height. The termination floor (`trunk_y < 0.15`)
+still needs the Y=0 assumption on flat terrain — that threshold will need a
+terrain-relative version for SCM.
+
+Evaluation gate before adding any next term:
+
+```text
+survival_rate = 1.0
+mean_reward ≈ 1000
+trunk_y stable from step 0 (no pitch on spawn)
+```
+
+**Consequences:**
+- ADR-001 through ADR-005 are superseded. Their context and reasoning are preserved
+  as the record of what was tried. Git history preserves the code.
+- All previous policy checkpoints are invalid — retrain from scratch.
+- The "one term at a time" rule (from the penalty overload failure) is the core
+  constraint going forward.
+
+---
 
 ---
 
