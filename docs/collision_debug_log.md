@@ -1,48 +1,31 @@
 # Collision Debug Log
 
-This log records the collision decisions for the Chrono Go1 port.
+Architecture Decision Records for Go1 Chrono collision setup.
+Git history records the staged debug process. These docs record only the current rational state.
 
-## Problem
+---
 
-The initial contact fix enabled collision on every non-fixed body imported by
-`ChParserURDF`. That proved the robot could contact terrain, but it made the
-simulation unstable:
+## ADR-001: Collision Whitelist
 
-```text
-robot launches upward
-or scuttles briefly, then solver energy explodes
-```
+**Status:** Accepted
 
-This happened even when motors were disabled, so the cause was not only
-position target snapping.
+**Context:** `ChParserURDF` imports collision shapes with collision disabled.
+Enabling all non-fixed bodies caused solver instability (robot launches, scuttles,
+then energy explodes) even with motors disabled. Root cause was internal rotor and
+sensor marker bodies colliding with terrain and each other before the constraint
+solver could converge.
 
-## Debug Method
-
-`view_env.py` was used as the live test harness.
-
-`Go1Env` also supports:
-
-```python
-Go1Env(enable_motors=False)
-```
-
-This isolates URDF/contact behavior from motor targets.
-
-Collision was re-enabled in stages:
+Staged debug using `view_env.py` with `Go1Env(enable_motors=False)`:
 
 ```text
-feet only                  stable, but trunk clips through ground
-trunk + feet               stable
-trunk + calves + feet      stable
-trunk + thighs + calves + feet
-                           stable
-trunk + hips + thighs + calves + feet
-                           unstable until hip origin fix
+feet only                           stable — trunk clips ground
+trunk + feet                        stable
+trunk + calves + feet               stable
+trunk + thighs + calves + feet      stable
+trunk + hips + thighs + calves + feet   unstable → fixed by ADR-002
 ```
 
-## Current Collision Whitelist
-
-The env disables all robot body collision first, then enables only the external
+**Decision:** Disable all collision after import, then enable only the external
 contact envelope:
 
 ```python
@@ -55,107 +38,42 @@ _ROBOT_COLLISION_BODIES = (
 )
 ```
 
-Disabled collision bodies include:
+Rotor, camera, and sensor marker bodies stay disabled.
 
-```text
-hip rotors
-thigh rotors
-calf rotors
-camera marker links
-ultrasound marker links
-other tiny sensor/ROS marker collision boxes
-```
+**Consequences:**
+- Matches MuJoCo Menagerie — Menagerie exposes no separate rotor collision bodies.
+  Actuator effects are represented through joint parameters (damping, armature, etc.),
+  not terrain-contact shells.
+- URDF rotor bodies may still contribute mass/inertia but not terrain contact.
 
-## Why Rotor/Sensor Collisions Stay Disabled
+---
 
-The project runs in Chrono, but MuJoCo Menagerie is used as a reference model
-for Go1 values. In Menagerie `unitree_go1/go1.xml`, collision geoms are attached
-to external bodies:
+## ADR-002: Hip Collision Origin
 
-```text
-trunk
-hip
-thigh
-calf
-foot
-```
+**Status:** Accepted
 
-There are no separate colliding rotor bodies such as:
-
-```text
-FR_hip_rotor
-FR_thigh_rotor
-FR_calf_rotor
-```
-
-Menagerie represents rotor/actuator effects through joint and actuator
-parameters such as damping, friction loss, armature, position gains, and force
-ranges. It does not expose rotor cylinders as terrain-contact shells.
-
-Tradeoff: the URDF rotor bodies may still contribute imported mass/inertia, but
-their collision shapes are excluded from terrain and self-contact. This matches
-the external-contact intent better than letting internal motor markers collide.
-
-References:
-
-```text
-MuJoCo Menagerie Go1:
-https://github.com/google-deepmind/mujoco_menagerie/blob/main/unitree_go1/go1.xml
-
-MuJoCo body/geom docs:
-https://mujoco.readthedocs.io/en/latest/XMLreference.html#body-geom
-
-MuJoCo joint docs, including armature:
-https://mujoco.readthedocs.io/en/latest/XMLreference.html#body-joint
-```
-
-## Hip Collision Fix
-
-The original Chrono URDF had one hip collision cylinder per hip body:
+**Context:** With hips added to the whitelist, the simulation destabilized.
+Original hip cylinder:
 
 ```xml
 <origin rpy="1.5707963267948966 0 0" xyz="0 +/-0.08 0"/>
 <cylinder length="0.04" radius="0.046"/>
 ```
 
-With hips enabled, this destabilized the simulation.
+`y=+/−0.08` placed the collision cylinder partially outside the hip body, causing
+self-collision and solver instability.
 
-MuJoCo Menagerie's closest corresponding hip primitive uses:
+MuJoCo Menagerie reference value for the corresponding hip primitive: `y=+/−0.045`.
 
-```text
-position: +/-0.045
-radius:   0.046
-```
-
-The Chrono URDF fix changes the existing collision element in place:
+**Decision:** Correct the existing element to the Menagerie value:
 
 ```xml
 <origin rpy="1.5707963267948966 0 0" xyz="0 +/-0.045 0"/>
 <cylinder length="0.04" radius="0.046"/>
 ```
 
-Important constraint:
-
-```text
-Do not add new collision elements just because Menagerie has extra primitives.
-Only correct values on existing URDF collision elements unless there is a clear
-Chrono-specific reason to modify the model structure.
-```
-
-Extra Menagerie hip cylinders were briefly tested and destabilized Chrono, so
-they were removed. The current URDF keeps one hip collision cylinder per hip.
-
-## Current Result
-
-With:
-
-```text
-position motors enabled
-target ramp enabled
-trunk/hip/thigh/calf/foot collisions enabled
-rotor/sensor collisions disabled
-hip origin corrected to +/-0.045
-```
-
-`view_env.py` shows the robot standing without the previous launch/explosion
-behavior.
+**Consequences:**
+- Simulation stable with all five link segments colliding.
+- _Rejected: adding extra Menagerie hip primitives_ — tested and destabilised Chrono.
+  One cylinder per hip is sufficient.
+- Rule: correct values on existing URDF elements only. Do not add new shapes.

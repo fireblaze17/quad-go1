@@ -35,18 +35,22 @@ _TERRAIN_LENGTH = 6.0
 _TERRAIN_WIDTH = 4.0
 _TERRAIN_DELTA = 0.04
 
-# Chrono's URDF parser initializes only the root pose, not a full home keyframe.
-# This height keeps the zero-pose feet out of the ground before motors ramp in.
-_SPAWN_HEIGHT = 0.48
+# At home angles (hip=0, thigh=0.9, calf=-1.8) the leg length trunk→foot is ~0.27 m.
+# Spawn trunk at 0.35 m so feet clear the ground by ~0.08 m after assembly.
+_SPAWN_HEIGHT = 0.35  # trunk root height; DoAssembly drives legs to home before first step
 _TERM_HEIGHT = 0.15
+_UPRIGHT_WEIGHT         = 1.0
+_MIN_UPRIGHT_ALIGNMENT  = 0.75
+_POSE_PENALTY_WEIGHT    = 0.15  # penalise joint deviation from home pose
+_CONTROL_PENALTY_WEIGHT = 0.01  # penalise large actions — matches MuJoCo baseline
+_ANG_VEL_PENALTY_WEIGHT = 0.05  # penalise trunk angular velocity — matches MuJoCo baseline
+_ALIVE_BONUS            = 1.0   # reward per surviving step — matches MuJoCo; terrain-agnostic
 
 # MuJoCo Menagerie unitree_go1/go1.xml:
 # <key name="home" qpos="0 0 0.27 1 0 0 0 ..." ctrl="0 0.9 -1.8 ..."/>
 # Zero action holds this home control pose.
 _HOME_JOINT_ANGLES = np.tile([0.0, 0.9, -1.8], 4).astype(np.float32)
 _ACTION_SCALE = 0.25
-_TARGET_RAMP_TIME = 1.0
-_TARGET_RAMP_STEPS = max(1, int(_TARGET_RAMP_TIME / _TIME_STEP))
 
 # Joint limits from go1_chrono.urdf, in _JOINT_NAMES order.
 _JOINT_LOW = np.tile([-0.863, -0.686, -2.818], 4).astype(np.float32)
@@ -54,6 +58,26 @@ _JOINT_HIGH = np.tile([0.863, 4.501, -0.888], 4).astype(np.float32)
 
 # Revolute joint names. This order is shared by actions, observations, limits,
 # and home targets, so keep it synchronized with go1_chrono.urdf.
+# Also defines which component of the rotation vector to read for each joint.
+# GetRotVec() returns axis*angle in the relative frame.
+# Hip joints rotate about URDF X (axis="1 0 0"), which stays Chrono X after
+# the -90° spawn rotation → read component 0, sign=+1.
+# Thigh/calf rotate about URDF +Y (axis="0 1 0") → Chrono -Z after spawn.
+# For rotation θ about -Z: GetRotVec().z = -θ.
+# At home (thigh=0.9): GetRotVec().z = -0.9.
+# sign=-1 corrects this: reading = -1*(-0.9) = +0.9, matching _HOME_JOINT_ANGLES.
+# sign=+1 (tried and wrong): reading = -0.9 → pose_error = (-0.9-0.9)²=3.24 per joint
+#   → total pose_penalty ≈ 6.5/step → reward ≈ -6500/episode.
+_JOINT_AXES = np.array(
+    [0, 2, 2,   # FR: hip=X, thigh=Z, calf=Z
+     0, 2, 2,   # FL
+     0, 2, 2,   # RR
+     0, 2, 2],  # RL
+    dtype=np.int32,
+)
+# Hip: sign=+1 (X component directly correct).
+# Thigh/calf: sign=-1 (negates the Chrono -Z rotation sign back to URDF convention).
+_JOINT_AXIS_SIGN = np.where(_JOINT_AXES == 0, 1.0, -1.0).astype(np.float32)
 _JOINT_NAMES = [
     "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
     "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
@@ -105,15 +129,23 @@ class Go1Env(gym.Env):
         render_mode: str = None,
         terrain: str = "flat",
         enable_motors: bool = True,
+        friction_range: tuple[float, float] = (0.8, 0.8),
     ):
         super().__init__()
         if terrain not in ("flat", "scm"):
             raise ValueError("terrain must be 'flat' or 'scm'")
+        if len(friction_range) != 2:
+            raise ValueError("friction_range must be a (min, max) pair")
+        friction_min, friction_max = friction_range
+        if friction_min <= 0 or friction_max <= 0 or friction_min > friction_max:
+            raise ValueError("friction_range must satisfy 0 < min <= max")
 
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.terrain_type = terrain
         self.enable_motors = enable_motors
+        self.friction_range = (float(friction_min), float(friction_max))
+        self.ground_friction = None
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(37,), dtype=np.float32
@@ -151,6 +183,7 @@ class Go1Env(gym.Env):
             terrain = self._create_scm_terrain(system)
         else:
             terrain = None
+            self.ground_friction = self._sample_ground_friction()
             self._add_flat_ground(system)
 
         parser = self._create_robot_parser()
@@ -158,10 +191,25 @@ class Go1Env(gym.Env):
         self._configure_imported_bodies(system, parser)
         self._cache_robot_handles(system, terrain, parser)
 
+        # Zero-overhead home-pose init: fix the trunk so it cannot drift, then
+        # run Chrono's kinematic assembly solver (pure constraint satisfaction,
+        # no forces, no time integration). This drives every position-motor
+        # constraint to its target (home angle) in one call, placing all leg
+        # bodies in the correct standing pose before the first DoStepDynamics().
+        # AssemblyAnalysis.POSITION = 1.
+        self._trunk.SetFixed(True)
+        system.DoAssembly(1)
+        self._trunk.SetFixed(False)
+
         if self.render_mode == "human":
             self._create_visualizer(system)
 
+    def _sample_ground_friction(self) -> float:
+        friction_min, friction_max = self.friction_range
+        return float(self.np_random.uniform(friction_min, friction_max))
+
     def _create_scm_terrain(self, system):
+        self.ground_friction = None
         terrain = veh.SCMTerrain(system)
         # SCMTerrain's native frame is Z-up. Rotate it to match the Y-up
         # robot/world convention used throughout this repo.
@@ -185,11 +233,11 @@ class Go1Env(gym.Env):
         return terrain
 
     def _add_flat_ground(self, system) -> None:
-        # Ground and foot friction are both set to 0.8 so Chrono's contact
-        # combination gives the same effective sliding friction used by the Go1
-        # reference while keeping flat terrain fast for debugging/training.
+        # Sampled flat-ground friction is the first domain-randomization knob.
+        # Foot friction stays at the Go1 reference value; only the floor material
+        # changes from episode to episode.
         ground_mat = chrono.ChContactMaterialSMC()
-        ground_mat.SetFriction(0.8)
+        ground_mat.SetFriction(self.ground_friction)
         ground_mat.SetRollingFriction(0.0001)
         ground_mat.SetRestitution(0.0)
 
@@ -246,9 +294,11 @@ class Go1Env(gym.Env):
 
         # Pre-allocate one constant target function per position motor so we can
         # update desired joint angles in-place each step.
+        # Initialise to home angles so joints are at the correct pose from step 0
+        # — no ramp needed, matching SBEL's Go2 actuate() pattern.
         self._motor_funcs = []
-        for motor in self._motors:
-            function = chrono.ChFunctionConst(0.0)
+        for i, motor in enumerate(self._motors):
+            function = chrono.ChFunctionConst(float(_HOME_JOINT_ANGLES[i]))
             motor.SetMotorFunction(function)
             self._motor_funcs.append(function)
 
@@ -276,26 +326,30 @@ class Go1Env(gym.Env):
         vis.AddTypicalLights()
         self._vis = vis
 
-    def _joint_angle(self, b1, b2) -> float:
-        """Approximate revolute joint angle from relative body rotation.
+    def _joint_angle(self, b1, b2, axis_idx: int, sign: float) -> float:
+        """Revolute joint angle from relative body rotation.
 
-        Chrono revolute joints rotate about the Z axis of the joint frame.
-        We compute the relative quaternion q_rel = q1_inv * q2 and return
-        the Z component of its rotation vector (= axis * angle), which equals
-        the rotation angle when the axis is close to Z.
+        Reads the component of the rotation vector along the joint's actual
+        rotation axis in Chrono world space:
+          axis_idx=0 (X) for hip abduction joints (URDF axis="1 0 0")
+          axis_idx=2 (Z) for thigh/calf joints    (URDF axis="0 1 0" → Chrono -Z)
+        sign corrects for URDF Y mapping to Chrono -Z.
         """
         q1 = b1.GetRot()
         q2 = b2.GetRot()
         q_rel = q1.GetInverse() * q2
-        return float(q_rel.GetRotVec().z)
+        rv = q_rel.GetRotVec()
+        components = (rv.x, rv.y, rv.z)
+        return sign * float(components[axis_idx])
 
-    def _joint_vel(self, b1, b2) -> float:
-        """Relative angular velocity around Z in body1's frame."""
+    def _joint_vel(self, b1, b2, axis_idx: int, sign: float) -> float:
+        """Relative angular velocity along the joint's rotation axis."""
         w1 = b1.GetAngVelParent()
         w2 = b2.GetAngVelParent()
         dw_world = chrono.ChVector3d(w2.x - w1.x, w2.y - w1.y, w2.z - w1.z)
         dw_local = b1.GetRot().GetInverse().Rotate(dw_world)
-        return float(dw_local.z)
+        components = (dw_local.x, dw_local.y, dw_local.z)
+        return sign * float(components[axis_idx])
 
     def _get_obs(self) -> np.ndarray:
         pos = self._trunk.GetPos()
@@ -305,11 +359,17 @@ class Go1Env(gym.Env):
 
         if self._joint_body_pairs:
             joint_pos = np.array(
-                [self._joint_angle(b1, b2) for b1, b2 in self._joint_body_pairs],
+                [
+                    self._joint_angle(b1, b2, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
+                    for i, (b1, b2) in enumerate(self._joint_body_pairs)
+                ],
                 dtype=np.float32,
             )
             joint_vel = np.array(
-                [self._joint_vel(b1, b2) for b1, b2 in self._joint_body_pairs],
+                [
+                    self._joint_vel(b1, b2, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
+                    for i, (b1, b2) in enumerate(self._joint_body_pairs)
+                ],
                 dtype=np.float32,
             )
         else:
@@ -325,6 +385,72 @@ class Go1Env(gym.Env):
             joint_vel,
         ]).astype(np.float32)
 
+    def _trunk_up_alignment(self) -> float:
+        """Return trunk local-up alignment with Chrono world Y-up."""
+        trunk_up = self._trunk.GetRot().Rotate(chrono.ChVector3d(0, 0, 1))
+        return float(np.clip(trunk_up.y, -1.0, 1.0))
+
+    def _trunk_axis_alignments(self) -> dict[str, float]:
+        """Return each trunk local axis alignment with Chrono world Y-up."""
+        rot = self._trunk.GetRot()
+        return {
+            "trunk_x_up": float(np.clip(rot.Rotate(chrono.ChVector3d(1, 0, 0)).y, -1.0, 1.0)),
+            "trunk_y_up": float(np.clip(rot.Rotate(chrono.ChVector3d(0, 1, 0)).y, -1.0, 1.0)),
+            "trunk_z_up": float(np.clip(rot.Rotate(chrono.ChVector3d(0, 0, 1)).y, -1.0, 1.0)),
+        }
+
+    def _standing_reward(self, obs: np.ndarray, action: np.ndarray) -> tuple[float, dict]:
+        """Standing reward built one observed failure mode at a time."""
+        if not np.all(np.isfinite(obs)):
+            return -10.0, {"invalid_obs": 1.0}
+
+        trunk_y = float(obs[1])
+        # Alive bonus: constant +1 per surviving step. Terrain-agnostic —
+        # works on flat and SCM deformable ground. Matches MuJoCo baseline.
+        alive_bonus = _ALIVE_BONUS
+
+        # Upright: keep trunk vertical.
+        upright_score = max(0.0, self._trunk_up_alignment())
+
+        # Stage 3 reward: penalise joint deviation from home pose.
+        # Prevents the legs collapsing while trunk stays level (sinking loophole).
+        joint_pos = obs[13:25]  # indices in _get_obs: pos(3)+rot(4)+linvel(3)+angvel(3) = 13
+        pose_error = float(np.sum(np.square(joint_pos - _HOME_JOINT_ANGLES)))
+        pose_penalty = _POSE_PENALTY_WEIGHT * pose_error
+
+        # Stage 4 reward: penalise large actions — matches MuJoCo control_penalty.
+        # Discourages saturation (max_abs_action=1.0) and unnecessary joint motion.
+        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.sum(np.square(action)))
+
+        # Stage 5 reward: penalise trunk angular velocity — matches MuJoCo angular_velocity_penalty.
+        # obs[10:13] = trunk angular velocity in world frame.
+        ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.sum(np.square(obs[10:13])))
+
+        reward = float(alive_bonus + _UPRIGHT_WEIGHT * upright_score - pose_penalty - control_penalty - ang_vel_penalty)
+
+        terms = {
+            "alive_bonus": alive_bonus,
+            "upright_score": float(upright_score),
+            "pose_error": pose_error,
+            "pose_penalty": pose_penalty,
+            "control_penalty": control_penalty,
+            "ang_vel_penalty": ang_vel_penalty,
+            "trunk_y": trunk_y,
+        }
+        terms.update(self._trunk_axis_alignments())
+        return reward, terms
+
+    def _termination_reason(self, obs: np.ndarray, reward_terms: dict) -> str | None:
+        if not np.all(np.isfinite(obs)):
+            return "invalid_obs"
+        if float(obs[1]) < _TERM_HEIGHT:
+            return "height"
+        # Stage 3 termination: falling forward/sideways is a failure, not just
+        # a low-reward pose.
+        if reward_terms.get("upright_score", 1.0) < _MIN_UPRIGHT_ALIGNMENT:
+            return "tip"
+        return None
+
     # ---------------------------------------------------------------------- #
     # Gymnasium interface
     # ---------------------------------------------------------------------- #
@@ -333,20 +459,15 @@ class Go1Env(gym.Env):
         super().reset(seed=seed)
         self._build_sim()
         self.step_count = 0
-        return self._get_obs(), {}
+        return self._get_obs(), self._info()
 
     def step(self, action: np.ndarray):
         self.step_count += 1
 
+        clipped_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         if self.enable_motors:
-            action = np.clip(action, -1.0, 1.0).astype(np.float32)
-            desired_targets = _HOME_JOINT_ANGLES + _ACTION_SCALE * action
-            desired_targets = np.clip(desired_targets, _JOINT_LOW, _JOINT_HIGH)
-
-            # Ramp target commands during startup so the position motors do not
-            # snap from the parser's zero-pose into the Menagerie home pose.
-            ramp = min(1.0, self.step_count / _TARGET_RAMP_STEPS)
-            targets = ramp * desired_targets
+            desired_targets = _HOME_JOINT_ANGLES + _ACTION_SCALE * clipped_action
+            targets = np.clip(desired_targets, _JOINT_LOW, _JOINT_HIGH)
             for function, target in zip(self._motor_funcs, targets):
                 function.SetConstant(float(target))
         else:
@@ -360,10 +481,24 @@ class Go1Env(gym.Env):
 
         obs = self._get_obs()
         truncated = self.step_count >= self.max_steps
-        terminated = bool(obs[1] < _TERM_HEIGHT)
-        reward = 0.0  # Placeholder until standing/walking rewards are added.
+        reward, reward_terms = self._standing_reward(obs, clipped_action)
+        termination_reason = self._termination_reason(obs, reward_terms)
+        terminated = termination_reason is not None
+        if terminated:
+            reward -= 5.0
 
-        return obs, reward, terminated, truncated, {"target_joint_angles": targets}
+        info = self._info()
+        info["target_joint_angles"] = targets
+        info["reward_terms"] = reward_terms
+        info["termination_reason"] = termination_reason
+        return obs, reward, terminated, truncated, info
+
+    def _info(self) -> dict:
+        return {
+            "terrain": self.terrain_type,
+            "ground_friction": self.ground_friction,
+            "friction_range": self.friction_range,
+        }
 
     def render(self) -> bool:
         """Render one frame. Returns False when the window has been closed."""
