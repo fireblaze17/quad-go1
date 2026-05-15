@@ -54,9 +54,9 @@ to local `meshes/`.
 **Context:** First policy needs a stable actuation baseline. Torque control requires
 tuned PD gains and is harder to stabilize initially.
 
-**Decision:** `ActuationType_POSITION` for all joints. Zero action holds the MuJoCo
-Menagerie home pose (`hip=0.0, thigh=0.9, calf=−1.8`). Actions are normalized
-offsets: `target = home + 0.25 × action`.
+**Decision:** `ActuationType_POSITION` for all joints. Zero action holds the
+accepted Chrono standing pose (`hip=0.0`, `thigh=0.7`, `calf=-1.4`). Actions are
+normalized offsets: `target = home + 0.25 * action`.
 
 **Consequences:**
 - Easier to stabilize for first standing and walking policies.
@@ -154,14 +154,24 @@ A fresh visualizer is created each build when `render_mode="human"`.
 
 ---
 
-## ADR-008: Joint Axis Reading
+## ADR-008: Joint Angle Reading
 
 **Status:** Accepted
 
 **Context:** `CastToChLinkMotorRotation(motor).GetMotorAngle()` is not exposed in
-this PyChrono build. Joint angles must be computed from body-frame rotation vectors.
+this PyChrono build. The first workaround computed joint angles from linked
+body-pair rotation vectors, but reset diagnostics showed that path read
+thigh/calf angles near zero even after `DoAssembly(POSITION)` placed the robot
+in the home pose.
 
-**Decision:** Per-joint axis map and sign correction applied to `GetRotVec()`:
+**Decision:** Compute joint angles from each motor's absolute frames, then apply
+the per-joint axis map and sign correction to `GetRotVec()`:
+
+```python
+frame1 = motor.GetFrame1Abs()
+frame2 = motor.GetFrame2Abs()
+q_rel = frame1.GetRot().GetInverse() * frame2.GetRot()
+```
 
 ```python
 _JOINT_AXES      = np.array([0,2,2, 0,2,2, 0,2,2, 0,2,2], dtype=np.int32)
@@ -172,15 +182,25 @@ Geometric derivation:
 
 - **Hip:** URDF `axis="1 0 0"` (X). After −90° spawn rotation, still Chrono X.
   `GetRotVec().x = θ`. Sign = +1.
-- **Thigh/calf:** URDF `axis="0 1 0"` (Y). After −90° spawn rotation, Y → Chrono −Z.
-  Rotation of angle θ about −Z gives `GetRotVec().z = −θ`.
-  At home (thigh θ = 0.9 rad): `GetRotVec().z = −0.9`.
-  `sign=−1`: reading = `−1 × (−0.9) = +0.9` ✓ matches `_HOME_JOINT_ANGLES[thigh]`
-  `sign=+1`: reading = `+1 × (−0.9) = −0.9` ✗ → pose_error = 3.24 per joint → 0% survival
+- **Thigh/calf:** URDF `axis="0 1 0"` (Y). After -90 degree spawn rotation,
+  Y maps to Chrono -Z. Rotation of angle theta about -Z gives
+  `GetRotVec().z = -theta`.
+  At the accepted home pose (thigh theta = 0.7 rad), `GetRotVec().z = -0.7`.
+  `sign=-1`: reading = `-1 * (-0.7) = +0.7`, matching `_HOME_JOINT_ANGLES[thigh]`.
+  `sign=+1`: reading = `+1 * (-0.7) = -0.7`, which is wrong and creates false
+  pose error at reset.
 
 **Consequences:**
 - Full retrain required when axis constants change — hip observation values shift from ~0 to real angles.
-- _Rejected: sign=+1_ — see derivation above. Caused total pose_penalty ≈ 6.5/step → −6500/episode.
+- _Rejected: sign=+1_ - see derivation above. It reports the correct assembled
+  home pose with the wrong sign, so the reward punishes the robot at reset.
+
+---
+
+**Latest validation:** A temporary motor-frame diagnostic showed the reading
+matches the assembled home pose within numerical tolerance. Full retrain is
+required after this observation change because the pose reward now sees the real
+reset stance.
 
 ---
 
@@ -227,13 +247,41 @@ self._trunk.SetFixed(False)
 ```
 
 **Consequences:**
-- Zero compute overhead. Robot spawns at home pose, drops ~0.08 m to the floor, settles.
+- Zero compute overhead. Robot spawns directly into the accepted home pose at its
+  tested support height.
 - _Rejected: motor ramp_ — wasted 500 training steps per episode.
 - _Rejected: warm-up loop_ — ~5% overhead rejected as unnecessary.
 - _Inspiration:_ [harryzhang1018](https://github.com/harryzhang1018) /
   [SBEL multi-terrain RL](https://github.com/uwsbel/sbel-reproducibility/tree/master/2025/multi-terrain-RL)
   (UW-Madison, 2025) — calls `actuate(home)` before any physics steps.
   Our `DoAssembly` achieves the same correctly without a warm-up loop.
+
+---
+
+## ADR-011: Accepted Chrono Home Pose
+
+**Status:** Accepted - see [training_roadmap.md ADR-011](training_roadmap.md)
+
+**Context:** Position control makes zero action hold the home pose. The original
+Menagerie pose (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) was stable in the reference
+model but not in this Chrono import: zero-action `view_env.py` runs slowly sank
+and terminated on height. That made the standing policy compensate for a bad
+neutral pose.
+
+**Decision:** Use the less-crouched Chrono baseline:
+
+```python
+home per leg = [0.0, 0.7, -1.4]
+spawn height = 0.34
+```
+
+**Why:** `less_crouched @ 0.34` starts at its natural support height and remains
+stable with zero action. SBEL's sign-adjusted candidate also stood, but dropped
+down from the tested spawn heights before settling. The accepted pose is the
+cleaner Go1 baseline for retraining.
+
+**Consequence:** Retrain from scratch. The standing policy now learns correction
+around a physically stable neutral pose instead of rescuing an unstable one.
 
 ---
 
@@ -297,4 +345,3 @@ Damping:            3e4
 ```
 
 These will need tuning against real soil data before SCM training (Stage 4).
-

@@ -1,242 +1,418 @@
 # Training Roadmap
 
 Architecture Decision Records for the Chrono Go1 standing policy. Each section
-is the context that forced a decision, what was decided, and what it costs.
-Git history records what was tried. These docs record only the current rational state.
+records the context that forced a decision, what was decided, what worked, what
+did not work, and what the decision costs.
 
-## Stage 1: Standing — Flat Terrain, Fixed Friction=0.8
+Git history records every code state. This file records the current rational
+path through the experiments.
+
+## Stage 1: Standing - Flat Terrain, Fixed Friction=0.8
 
 ```python
 Go1Env(terrain="flat", enable_motors=True, friction_range=(0.8, 0.8))
 ```
 
-Active reward: **reset — see ADR-008.** Building from scratch with a single term.
+Current reward:
 
 ```python
-reward = alive_bonus(+1.0)   # starting baseline — one term at a time
+reward = (
+    alive_bonus
+    + upright_reward
+    - pose_penalty
+    - control_penalty
+    - joint_vel_penalty
+    - action_rate_penalty
+    - tilt_penalty
+    - ang_vel_penalty
+    - xz_vel_penalty
+)
 ```
 
----
-
-## ADR-001: Reward Term 1 — `alive_bonus`
-
-**Status:** Superseded by ADR-008 (reward reset)
-
-**Context:** The original first term was `height_score = clip((trunk_y − 0.15) / (0.28 − 0.15), 0, 1)`.
-It encodes a Y=0 ground assumption. On SCM deformable terrain the ground surface
-varies — a robot sinking correctly into soft soil would be penalised. Not transferable.
-
-**Decision:** Replace with `alive_bonus = 1.0` per surviving step. Terrain-agnostic.
-Matches MuJoCo baseline.
-
-**Consequences:**
-- Alive bonus does not gradient-push the robot to stand tall — upright score and
-  termination floor do that job.
-- `_TERM_HEIGHT = 0.15` is kept for termination only; will need a terrain-relative
-  version for SCM.
-
----
-
-## ADR-002: Reward Term 2 — `upright_score`
-
-**Status:** Superseded by ADR-008 (reward reset)
-
-**Context:** With only `alive_bonus`, the policy learned to pitch forward slowly.
-Trunk height stayed above the termination floor but the robot gradually tipped.
-
-**Decision:** `upright_score = max(0, trunk_local_Z · world_Y)`. Rewards keeping the
-trunk's local Z axis (URDF "up") aligned with Chrono world Y-up. Termination
-threshold `_MIN_UPRIGHT_ALIGNMENT = 0.75` added alongside.
-
-**Consequences:**
-- `Rotate(ChVector3d(0,0,1)).y` is the correct computation in this Y-up world.
-- Termination is required alongside reward — reward alone was insufficient to stop
-  a slowly tipping robot.
-
----
-
-## ADR-003: Reward Term 3 — `pose_penalty` (weight=0.15)
-
-**Status:** Superseded by ADR-008 (reward reset)
-
-**Context:** After upright score was added, the robot found a new loophole: hold the
-trunk level while legs fold straight down. Trunk sank gradually while `upright_score`
-stayed at 1.0. Diagnostic data from a 1500-step episode:
+Current weights:
 
 ```text
-step 500:  trunk_y=0.353  (settled at home height)
-step 900:  trunk_y=0.291  (sinking −0.014 per 100 steps)
-step 1400: trunk_y=0.225  (approaching termination floor)
+alive_bonus             1.00
+upright_reward          0.15 * upright_score
+pose_penalty            0.10 * mean(joint_error^2)
+control_penalty         0.03 * mean(action^2)
+joint_vel_penalty       0.01 * mean(joint_velocity^2)
+action_rate_penalty     0.01 * mean(action_delta^2)
+tilt_penalty            0.25 * (trunk_x_up^2 + trunk_y_up^2)
+angular_vel_penalty     0.01 * mean(trunk_angular_velocity^2)
+xz_vel_penalty          0.20 * mean([vx, vz]^2)
 ```
 
-**Decision:** `pose_penalty = 0.15 × Σ(joint_angle − home_angle)²`. Penalises
-deviation from the 12-joint home pose `[0.0, 0.9, −1.8]` per leg.
+Current evaluation checkpoint:
 
-**Consequences:**
-- Weight 0.15 is conservative. If trunk_y still drifts after retrain, raise to 0.2.
-  Never jump to 0.4 — that weight was tested and caused policy collapse (see note below).
-- _Rejected: weight=0.1_ — insufficient to hold height long-term.
-- _Rejected: weight=0.4_ — caused penalty overload (see below).
+```text
+survival_rate:       1.000
+mean_length:         1000.0
+min_trunk_y:         0.336
+min_upright_score:   0.994
+mean_abs_xz_vel:     0.040
+mean_abs_joint_vel:  0.283
+mean_abs_action:     0.380
+termination:         truncated only
+```
 
-**Penalty overload rule:** An earlier attempt added five penalty terms simultaneously
-(`foot_height`, `action_rate`, `horizontal_vel`, `pose_weight=0.4`, `control_penalty`).
-Result: mean_reward ≈ −3000, 0% survival. The reward had no reachable positive region.
-**Rule: one term per training run. Evaluate before adding the next.**
-
----
-
-## ADR-004: Reward Term 4 — `control_penalty`
-
-**Status:** Superseded by ADR-008 (reward reset)
-
-**Context:** After pose penalty was added, evaluation showed `max_abs_action = 1.000` —
-policy saturated all joint targets to maximum offsets, causing jerky motion.
-
-**Decision:** `control_penalty = 0.01 × Σ(action²)`. Matches MuJoCo baseline weight.
-
-**Consequences:**
-- Weight 0.01 is small enough not to compete with alive bonus or upright score.
-- Complements pose_penalty: both discourage large joint offsets.
+Conclusion: flat-ground standing v1 is accepted. It is not perfect: there is
+still mild in-place leg chatter. But the policy stands upright, does not sink,
+does not drift into a fall, and no longer settles into a large one-sided lean.
 
 ---
 
-## ADR-005: Reward Term 5 — `ang_vel_penalty`
-
-**Status:** Superseded by ADR-008 (reward reset)
-
-**Context:** Trunk angular velocity was high in evaluation — robot wobbling rotationally
-while surviving. `obs[10:13]` = trunk angular velocity in world frame.
-
-**Decision:** `ang_vel_penalty = 0.05 × Σ(obs[10:13]²)`. Matches MuJoCo baseline weight.
-
-**Consequences:**
-- Weight 0.05 is moderate. Too heavy too early prevents posture recovery after perturbation.
-
----
-
-## ADR-006: Joint Axis Reading — Hip Angles
+## ADR-001: Reward Term 1 - `alive_bonus`
 
 **Status:** Accepted
 
-**Context:** After pose_penalty was active, evaluation showed 100% lateral tip
-termination (`trunk_y_up = −0.664`). Root cause: `_joint_angle()` always read the
-Z component of the rotation vector. Hip joints rotate about URDF X — their Z component
-is always ~0 regardless of actual abduction. Hips were invisible to the pose penalty.
+**Context:** A base-height reward was considered first, but absolute height
+assumes a flat Y=0 ground plane. That is fragile for Chrono SCM terrain, where
+the foot-ground interface can sink or deform.
 
-**Decision:** Per-joint axis map and sign correction:
+**Decision:** Use terrain-agnostic survival reward:
 
 ```python
-_JOINT_AXES      = np.array([0,2,2, 0,2,2, 0,2,2, 0,2,2], dtype=np.int32)
-_JOINT_AXIS_SIGN = np.where(_JOINT_AXES == 0, 1.0, -1.0)
+alive_bonus = 1.0
 ```
 
-Index 0 = X (hips), index 2 = Z (thigh/calf). Sign −1 for thigh/calf: URDF Y →
-Chrono −Z after spawn rotation, so `GetRotVec().z = −θ`. Multiplying by −1 gives
-+θ, matching home angles. Full geometric derivation: [chrono_port_notes.md](chrono_port_notes.md).
+**Why it worked:** it creates a simple base objective: remain in a valid standing
+episode for 1000 steps. Height and tilt stay as termination conditions or
+specialized penalties, not the main reward source.
 
-**Consequences:**
-- Full retrain required — hip observation values changed from ~0 to real angles.
-- _Rejected: sign=+1_ — at home pose, reading = −0.9 vs target = +0.9 →
-  pose_error = 3.24 per joint → pose_penalty ≈ 6.5/step → −6500/episode → 0% survival.
+**Tradeoff:** alive reward alone is sparse. It does not distinguish clean
+standing from barely surviving, so shaping terms are still required.
 
 ---
 
-## ADR-007: Home-Pose Spawn — `DoAssembly(POSITION)`
+## ADR-002: Reward Term 2 - `upright_reward`
+
+**Status:** Accepted at low weight
+
+**Context:** With survival alone, the policy can survive while trending toward a
+bad posture. The trunk needs a dense verticality signal.
+
+**Decision:**
+
+```python
+upright_score = max(0.0, trunk_z_up)
+upright_reward = 0.15 * upright_score
+```
+
+Chrono is Y-up, so `trunk_z_up` means the trunk local Z axis dotted against
+world Y.
+
+**What did not work:** increasing upright weight to 0.25 reduced visible lean,
+but it also brought back more leg shuffling. Upright reward is too broad: it
+encourages the policy to correct the trunk, but does not say how to correct it.
+
+**Tradeoff:** the accepted 0.15 weight is intentionally modest. A separate tilt
+penalty now handles persistent lean more directly.
+
+---
+
+## ADR-003: Reward Term 3 - `pose_penalty`
+
+**Status:** Accepted at low weight
+
+**Context:** Early alive/upright policies could keep the trunk mostly vertical
+while using odd leg configurations. Once the joint observation bug was fixed,
+pose error became meaningful.
+
+**Decision:**
+
+```python
+pose_error = joint_pos - home_joint_angles
+pose_penalty = 0.10 * mean(pose_error**2)
+```
+
+**What worked:** pose penalty keeps the legs near the known stable Chrono home
+stance.
+
+**What did not work:** trying to solve later falling/shuffling by increasing
+pose weight was the wrong diagnosis. Current failures showed tiny pose error,
+so the legs were near home while the body drifted or leaned.
+
+**Tradeoff:** pose penalty preserves Go1-like geometry, but too much pose
+regularization can fight necessary balance corrections.
+
+---
+
+## ADR-004: Reward Term 4 - `control_penalty`
+
+**Status:** Accepted at 0.03
+
+**Context:** The policy often used saturated action targets. A control penalty
+discourages large sustained commands.
+
+**Decision:**
+
+```python
+control_penalty = 0.03 * mean(action**2)
+```
+
+**What did not work:** larger control weights reduced corrective authority and
+made the robot tip or spin sooner. The problem was not simply "actions are too
+large"; the timing and physical motion of the legs also mattered.
+
+**Tradeoff:** this term should stay conservative. It helps keep commands
+reasonable, but it cannot remove chatter by itself.
+
+---
+
+## ADR-005: Reward Term 5 - `xz_vel_penalty`
 
 **Status:** Accepted
 
-**Context:** `ChParserURDF.SetRootInitPose()` initialises only the root body. All joint
-angles start at 0 — legs nearly straight down. The original fix was spawning at y=0.48
-and ramping motor targets from 0 to home over 500 steps, wasting 500 training steps
-per episode with no useful policy signal.
+**Context:** The robot developed horizontal drift and eventually tipped. Because
+Chrono is Y-up, horizontal ground-plane motion is X/Z, not X/Y.
 
-**Decision:** Initialise `ChFunctionConst` motors to home angles, then run Chrono's
-kinematic assembly solver before the first `DoStepDynamics()`:
+**Decision:**
 
 ```python
-self._trunk.SetFixed(True)
-system.DoAssembly(1)   # pure constraint satisfaction — no forces, no time integration
-self._trunk.SetFixed(False)
+xz_vel = trunk_lin_vel[[0, 2]]
+xz_vel_penalty = 0.20 * mean(xz_vel**2)
 ```
 
-Spawn height `_SPAWN_HEIGHT = 0.27` (Menagerie equilibrium). Feet land at y≈0 after
-assembly — no free-fall, no impact pitch. Zero compute overhead.
+**Why 0.20:** the old MuJoCo reference used a sum-style horizontal velocity
+penalty. This code uses `mean`, so 0.20 over two axes gives a similar scale.
 
-**Consequences:**
-- Full retrain required.
-- _Rejected: motor ramp (500 steps)_ — wasted training signal, complicated diagnostics.
-- _Rejected: warm-up loop (50–200 steps)_ — worked but ~5% overhead per episode.
-- _Rejected: spawn at 0.35 m_ — 8 cm free-fall caused forward pitch on impact.
-- _Inspiration:_ [harryzhang1018](https://github.com/harryzhang1018) /
-  [SBEL multi-terrain RL](https://github.com/uwsbel/sbel-reproducibility/tree/master/2025/multi-terrain-RL)
-  (UW-Madison, 2025) — calls `actuate(home)` before any physics steps. Our `DoAssembly`
-  achieves the same goal without a warm-up loop.
+**What worked:** mean X/Z velocity dropped into the acceptable range around
+0.04 in the flat-ground v1 checkpoint.
+
+**Tradeoff:** it reduces ground-plane drift, but it does not directly prevent
+lean or leg chatter.
 
 ---
 
-## ADR-008: Reward System Reset
+## ADR-006: Reward Term 6 - `ang_vel_penalty`
 
-**Status:** Active
+**Status:** Accepted at low weight
 
-**Context:** ADR-001 through ADR-005 were developed under compounding incorrect
-conditions:
-- The hip axis bug (ADR-006) was active during early training runs — hips were
-  invisible to the pose penalty, so policies that appeared to converge were not
-  actually holding the home pose.
-- The sign-flip mistake (sign=+1 for thigh/calf) was introduced and reverted,
-  invalidating any checkpoint trained during that period.
-- Penalty overload (five terms added simultaneously, pose_weight=0.4) caused 0%
-  survival and led to incorrect weight choices.
-- The spawn height was 0.35 m → 8 cm free-fall → forward pitch on impact,
-  meaning all previous training ran with a systematically biased initial condition.
-- No policy trained under the previous reward currently meets the evaluation
-  criteria (`survival_rate=1.0`, `mean_reward≈900`).
+**Context:** Several failed policies had significant trunk angular motion before
+tip or height termination. Penalizing angular velocity gives early pressure
+against body wobble.
 
-**Decision:** Wipe the reward. Start from a single term and add one term per training
-run, with a full evaluation pass before adding the next. Termination conditions
-(height + upright angle + NaN guard) are unchanged.
-
-Starting baseline:
+**Decision:**
 
 ```python
-reward = alive_bonus   # +1.0 per surviving step
+ang_vel_penalty = 0.01 * mean(trunk_ang_vel**2)
 ```
 
-**Why `alive_bonus` and not a height score:**
-A height score (`clip((trunk_y − 0.15) / (0.28 − 0.15), 0, 1)`) encodes the
-assumption that the ground surface is at Y=0. On SCM deformable terrain the
-ground varies — a robot correctly holding its joints while sinking 5 cm into
-soft soil would be penalised even though it is doing the right thing. `alive_bonus`
-is terrain-agnostic: any step that does not meet a termination condition earns
-+1.0, regardless of absolute trunk height. The termination floor (`trunk_y < 0.15`)
-still needs the Y=0 assumption on flat terrain — that threshold will need a
-terrain-relative version for SCM.
+**What did not work:** increasing angular-velocity weight too far made the robot
+too constrained. It reduced motion but could also make the policy less able to
+recover, causing quiet sinking or tipping.
 
-Evaluation gate before adding any next term:
+**Tradeoff:** angular velocity is useful as a damping signal, not as the main
+standing objective.
+
+---
+
+## ADR-007: Joint-Velocity Diagnostics
+
+**Status:** Diagnostic accepted; later became ADR-008 reward term
+
+**Context:** After the corrected home pose, the robot could survive but still
+visibly shuffled. Pose error stayed low, so the legs were not drifting far from
+home; they were likely moving quickly around home.
+
+**Decision:** Add telemetry:
+
+```python
+mean_abs_joint_vel = mean(abs(joint_vel))
+max_abs_joint_vel = max(abs(joint_vel))
+```
+
+`view_stand_policy.py` prints these as `jvel_mean` and `jvel_max`.
+
+**Result:** the telemetry lined up with visible leg chatter, so joint velocity
+became a real reward term.
+
+**Tradeoff:** joint velocity still comes from the linked-body approximation while
+joint position comes from motor frames. That is acceptable for the current
+smoothness signal, but should be revisited if this term becomes central to later
+walking.
+
+---
+
+## ADR-008: Reward Term 7 - `joint_vel_penalty`
+
+**Status:** Accepted
+
+**Context:** Visible shuffling remained even when pose error was tiny. A pose
+penalty only sees displacement from home, not rapid motion around home.
+
+**Decision:**
+
+```python
+joint_vel_penalty = 0.01 * mean(joint_vel**2)
+```
+
+**What worked:** joint velocity penalty reduced some oscillation and improved
+the smoothness metrics.
+
+**What did not fully work:** by itself, it did not eliminate shuffling. One run
+also introduced yaw/turn bias, showing that smoothing the legs can change how
+the body finds balance.
+
+**Tradeoff:** this term makes the policy calmer, but too much could prevent fast
+recovery motions later during perturbations, rough terrain, or walking.
+
+---
+
+## ADR-009: Reward Term 8 - `action_rate_penalty`
+
+**Status:** Accepted for standing v1
+
+**Context:** Joint-velocity penalty measures physical leg motion. It does not
+directly punish twitchy target changes from the policy. The viewer showed
+nontrivial action deltas during visible shuffling.
+
+**Decision:** Store the previous clipped action in the env and penalize target
+changes:
+
+```python
+action_delta = clipped_action - prev_action
+action_rate_penalty = 0.01 * mean(action_delta**2)
+```
+
+`reset()` clears `prev_action` to zeros.
+
+**What worked:** action delta dropped and the robot became smoother in the
+accepted v1 run.
+
+**Consequence:** the environment now has one step of action memory. That is
+normal for rate penalties, but it means reset behavior must always clear the
+previous action.
+
+**Tradeoff:** rate penalties can make a policy slower to react. Keep this term
+small until perturbation recovery is tested.
+
+---
+
+## ADR-010: Reward Term 9 - `tilt_penalty`
+
+**Status:** Accepted
+
+**Context:** After X/Z velocity, joint velocity, action rate, and low upright
+reward, the robot survived but settled into a biased lean. Raising upright
+reward helped lean but brought back more shuffling. Upright reward was too
+blunt.
+
+**Decision:** Add a direct trunk tilt penalty:
+
+```python
+tilt_error = trunk_x_up**2 + trunk_y_up**2
+tilt_penalty = 0.25 * tilt_error
+```
+
+This is separate from `upright_score`. It directly punishes non-up trunk axes
+having world-up components.
+
+**Why it worked:** the earlier leaning runs had average `trunk_y_up` around
+0.15 in one direction or the other. After adding tilt penalty, the accepted v1
+run had:
 
 ```text
-survival_rate = 1.0
-mean_reward ≈ 1000
-trunk_y stable from step 0 (no pitch on spawn)
+trunk_y_up mean:  -0.042
+tilt_error mean:  0.0037
+min_upright:      0.994
+survival:         1.000
 ```
 
-**Consequences:**
-- ADR-001 through ADR-005 are superseded. Their context and reasoning are preserved
-  as the record of what was tried. Git history preserves the code.
-- All previous policy checkpoints are invalid — retrain from scratch.
-- The "one term at a time" rule (from the penalty overload failure) is the core
-  constraint going forward.
+**Tradeoff:** tilt penalty fixes lean but does not directly remove leg chatter.
+That is why v1 is stable but still not perfectly smooth.
 
 ---
+
+## ADR-011: Home Pose Baseline - Less-Crouched Stance
+
+**Status:** Accepted
+
+**Context:** Zero action means "hold the position-control home pose." The
+original Menagerie pose (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) looked plausible
+but sank under zero action in Chrono. Reward tuning was compensating for a bad
+neutral pose.
+
+**Decision:**
+
+```python
+_HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4)
+_SPAWN_HEIGHT = 0.34
+```
+
+**Evidence from zero-action `view_env.py`:**
+
+```text
+less_crouched @ 0.32: y 0.320 -> 0.400 -> settles near 0.341
+less_crouched @ 0.34: y 0.340 -> 0.341 and stays there
+sbel_sign_adjusted @ 0.34: y 0.340 -> settles near 0.317
+sbel_sign_adjusted @ 0.36: y 0.360 -> settles near 0.314
+```
+
+`less_crouched @ 0.34` starts closest to its natural support height.
+
+**Tradeoffs:**
+- It departs from the exact MuJoCo Menagerie home keyframe.
+- It remains inside Go1 joint limits and is mechanically stable in this Chrono
+  import.
+- Zero-action standing does not make the policy pointless. The policy becomes a
+  correction controller for drift, friction changes, terrain variation, and
+  eventually SCM soil response.
+
+---
+
+## ADR-012: Joint Observation Source - Motor Frames
+
+**Status:** Accepted
+
+**Context:** The linked-body joint-angle workaround read thigh/calf joints near
+zero at reset even though `DoAssembly()` placed the motors at home. This created
+large false pose error before the robot moved.
+
+**Decision:** Read joint position from the motor frames:
+
+```python
+frame1 = motor.GetFrame1Abs()
+frame2 = motor.GetFrame2Abs()
+q_rel = frame1.GetRot().GetInverse() * frame2.GetRot()
+joint_angle = sign * q_rel.GetRotVec()[axis_idx]
+```
+
+**Result:** reset diagnostics report joint angles matching the home pose with
+mean-squared error near zero.
+
+**Consequence:** any policy trained before this fix is invalid for pose-reward
+tuning.
+
+---
+
+## ADR-013: Tip Termination Threshold
+
+**Status:** Accepted for current standing stage
+
+**Context:** A very strict tip threshold terminated episodes before the robot had
+room to learn recovery. A too-loose threshold would allow visibly fallen poses.
+
+**Decision:**
+
+```python
+_MIN_UPRIGHT_ALIGNMENT = 0.85
+```
+
+**Tradeoff:** this gives PPO more recovery data. Evaluation still tracks
+`min_upright_score`, so a policy that exploits the looser threshold is visible.
+The current v1 policy stays far above the threshold (`min_upright_score=0.994`).
 
 ---
 
 ## Termination Conditions
 
 ```text
-trunk_y < 0.15          — fallen to ground
-upright_score < 0.75    — tipped more than ~41°
-obs contains NaN/Inf    — physics solver exploded
+trunk_y < 0.22          fallen/collapsed too low on flat ground
+upright_score < 0.85    tipped beyond current recovery-training range
+obs contains NaN/Inf    physics solver exploded
+step_count >= max_steps successful truncation
 ```
 
 ---
@@ -246,12 +422,28 @@ obs contains NaN/Inf    — physics solver exploded
 After each retrain:
 
 ```text
-survival_rate = 1.0       (100% of episodes complete full 1000 steps)
-mean_reward ≈ 900–1000    (1.0 alive × 1000 steps − small penalties)
-mean_abs_action < 0.5     (not saturating)
-max_abs_action < 0.9      (well away from clip limits)
-ang_vel low               (trunk not spinning)
-trunk_y stable from step 0
+survival_rate = 1.0
+mean_length = 1000
+min_trunk_y > 0.22
+min_upright_score ideally > 0.95, v1 target > 0.99
+mean_abs_xz_vel low/stable
+mean_abs_joint_vel low/stable
+mean_abs_action_delta low/stable
+mean_abs_action below saturation
+max_abs_action not constantly clipped
+termination_reasons = {'truncated': episodes}
+```
+
+Viewer diagnostics to watch:
+
+```text
+axis=(trunk_x_up, trunk_y_up, trunk_z_up)  lean direction
+ang_xyz                                  body angular velocity
+xz_vel                                   ground-plane drift
+dact_mean/dact_max                        target twitchiness
+jvel_mean/jvel_max                        physical leg chatter
+tilt                                     lean penalty input
+pen=(...)                                reward term scale comparison
 ```
 
 ---
@@ -276,32 +468,20 @@ View:
 C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/stand/final_model.zip
 ```
 
-Evaluation targets:
-
-```text
-survival_rate     — 1.0
-mean_reward       — ≈ 900–1000
-mean_length       — 1000
-mean_abs_action   — < 0.5
-max_abs_action    — < 0.9
-min_trunk_y       — > 0.25
-min_upright_score — > 0.9
-```
-
 ---
 
 ## Roadmap
 
 ```text
-Stage 1  train_stand.py     flat terrain, fixed friction=0.8      ← active
-           ↳ position_penalty (×0.5)
-           ↳ xy_vel_penalty (×0.1)
-Stage 2  train_stand.py     flat terrain, friction randomized (0.6–1.0)
-Stage 3  train_walk.py      flat terrain walking
-Stage 4  train_walk_scm.py  SCM deformable terrain fine-tuning
-Stage 5  rollout collection learned standing/walking skills
-Stage 6  world model        obs/action/next_obs prediction
-Stage 7  hierarchy          skill selection and planning
+Stage 1  train_stand.py       flat terrain, fixed friction=0.8
+           -> flat-ground standing v1 accepted
+           -> next: reduce mild in-place shuffling
+Stage 2  train_stand.py       flat terrain, randomized friction
+Stage 3  train_walk.py        flat terrain walking
+Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
+Stage 5  rollout collection   learned standing/walking skills
+Stage 6  world model          obs/action/next_obs prediction
+Stage 7  hierarchy            skill selection and planning
 ```
 
 Stage 2 fine-tune command:

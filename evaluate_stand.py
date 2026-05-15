@@ -52,6 +52,8 @@ def main() -> None:
     mean_abs_actions = []
     max_abs_actions = []
     termination_reasons = {}
+    reward_term_totals = {}
+    reward_term_counts = {}
 
     for _ in range(args.episodes):
         obs, info = env.reset()
@@ -77,6 +79,11 @@ def main() -> None:
             steps += 1
             done = terminated or truncated
             reward_terms = info.get("reward_terms", {})
+            for key, value in reward_terms.items():
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    reward_term_totals[key] = reward_term_totals.get(key, 0.0) + float(value)
+                    reward_term_counts[key] = reward_term_counts.get(key, 0) + 1
+
             min_height = min(min_height, reward_terms.get("trunk_y", float("inf")))
             min_upright_score = min(
                 min_upright_score,
@@ -118,6 +125,10 @@ def main() -> None:
             for key, values in min_axis_scores.items()
         },
     )
+    print("mean_reward_terms:")
+    for key in sorted(reward_term_totals):
+        mean_value = reward_term_totals[key] / max(1, reward_term_counts[key])
+        print(f"  {key}: {mean_value:.6f}")
     print(f"termination_reasons: {termination_reasons}")
     if any(friction is not None for friction in frictions):
         print(f"friction_min_seen: {np.nanmin(frictions):.3f}")

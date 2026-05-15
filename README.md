@@ -1,6 +1,7 @@
 # Quad Go1
 
-Project Chrono robotics simulation and ML project for a Unitree Go1-style quadruped.
+Project Chrono robotics simulation and ML project for a Unitree Go1-style
+quadruped.
 
 ## Goal
 
@@ -13,29 +14,94 @@ Project Chrono robotics simulation and ML project for a Unitree Go1-style quadru
 ## Current Status
 
 ```text
-Stage 1 — standing policy, flat terrain, fixed friction=0.8
+Stage 1 - standing policy, flat terrain, fixed friction=0.8
 
-Active reward (reset — ADR-008):
-  alive_bonus(+1.0)   ← baseline only; add one term at a time after evaluation
+Active reward:
+  alive + upright
+  - pose
+  - control
+  - joint_velocity
+  - action_rate
+  - tilt
+  - angular_velocity
+  - xz_velocity
 
 Solved:
-  ✓ Chrono simulation + Y-up world
-  ✓ Chrono-specific Go1 URDF (trunk as free root)
-  ✓ Hip joint axis bug (hips now visible to pose penalty)
-  ✓ Motor ramp removed (DoAssembly — zero overhead)
-  ✓ Spawn height 0.27 m — no free-fall, no impact pitch
-  ✓ Reward system reset (ADR-008) — previous terms developed under invalid conditions
+  - Chrono simulation + Y-up world
+  - Chrono-specific Go1 URDF with trunk as the free root
+  - Hip joint axis bug; hips are visible to pose penalty
+  - Joint observations fixed; motor frames report true home pose
+  - Motor ramp removed; DoAssembly places the robot at home pose with no warm-up
+  - Stable Chrono home pose: hip=0.0, thigh=0.7, calf=-1.4
+  - Spawn height 0.34 m matches the less-crouched support height
+  - Flat-ground standing v1 completes 1000-step fixed-friction evaluations
 
 Pending:
-  ✗ Train on alive_bonus only — confirm survival_rate=1.0
-  ✗ Add upright_score, evaluate, then add pose_penalty, etc. (one term per run)
+  - Patch remaining mild in-place shuffling
+  - Save this as the flat-ground standing v1 checkpoint
+  - Start Stage 2 with randomized flat-ground friction
 ```
+
+## Latest Decision: Flat-Ground Standing v1
+
+**Status:** Accepted as the first usable standing baseline.
+
+The current policy stands on flat Chrono terrain at fixed friction 0.8. It no
+longer sinks, tips, or develops the large one-sided lean that appeared during
+earlier reward tests. The remaining defect is mild in-place leg chatter.
+
+The accepted reward stack is:
+
+```python
+reward = (
+    alive_bonus
+    + upright_reward
+    - pose_penalty
+    - control_penalty
+    - joint_vel_penalty
+    - action_rate_penalty
+    - tilt_penalty
+    - ang_vel_penalty
+    - xz_vel_penalty
+)
+```
+
+Current weights:
+
+```text
+alive_bonus             1.00
+upright_reward          0.15 * upright_score
+pose_penalty            0.10 * mean(joint_error^2)
+control_penalty         0.03 * mean(action^2)
+joint_vel_penalty       0.01 * mean(joint_velocity^2)
+action_rate_penalty     0.01 * mean(action_delta^2)
+tilt_penalty            0.25 * (trunk_x_up^2 + trunk_y_up^2)
+angular_vel_penalty     0.01 * mean(trunk_angular_velocity^2)
+xz_vel_penalty          0.20 * mean([vx, vz]^2)
+```
+
+Latest accepted evaluation:
+
+```text
+survival_rate:       1.000
+mean_length:         1000.0
+min_trunk_y:         0.336
+min_upright_score:   0.994
+mean_abs_xz_vel:     0.040
+mean_abs_joint_vel:  0.283
+mean_abs_action:     0.380
+termination:         truncated only
+```
+
+**Tradeoff:** this is stable enough to checkpoint, but not polished. The policy
+still uses visible corrective leg motion. The next reward work should target
+smoothness one term at a time so we do not break the recovered upright baseline.
 
 ## Project Shape
 
 ```text
 go1_env.py                 Chrono Gymnasium environment
-view_env.py                live test harness
+view_env.py                zero-action/live test harness
 train_stand.py             PPO standing-policy training
 evaluate_stand.py          headless policy evaluation
 view_stand_policy.py       trained-policy viewer
@@ -48,7 +114,7 @@ docs/                      decision logs and roadmap
 ## Quick Start
 
 ```powershell
-# View environment (no policy)
+# View environment with zero policy action
 C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_env.py
 
 # Train standing policy
@@ -63,98 +129,109 @@ C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/st
 
 ## Technical Decisions
 
-Each section: what forced the decision, what was chosen, what it costs.
-Full ADRs: [docs/chrono_port_notes.md](docs/chrono_port_notes.md) · [docs/training_roadmap.md](docs/training_roadmap.md) · [docs/collision_debug_log.md](docs/collision_debug_log.md)
-
----
+Each section records what forced the decision, what was chosen, and what it
+costs. Full ADRs:
+[docs/chrono_port_notes.md](docs/chrono_port_notes.md) -
+[docs/training_roadmap.md](docs/training_roadmap.md) -
+[docs/collision_debug_log.md](docs/collision_debug_log.md)
 
 ### ADR-001: Y-Up World + Position Control
 
 **Status:** Accepted
 
-**Context:** Go1 URDF is ROS Z-up. Chrono supports both. SCM terrain is Y-up native.
+Go1 source assets are ROS/Z-up, but this project uses Chrono with Y as the world
+up direction. The imported robot root is rotated -90 degrees about X. All joints
+use position control. Zero action means "hold the home pose," not "motors off."
 
-**Decision:** Y-up world (`SetGravityY`). Root pose rotated −90° about X on import.
-All joints use `ActuationType_POSITION`. Zero action = MuJoCo Menagerie home pose (`hip=0.0, thigh=0.9, calf=−1.8`). Actions are normalized offsets: `target = home + 0.25 × action`.
+Actions are normalized offsets:
 
----
+```python
+target = home + 0.25 * action
+```
 
 ### ADR-002: Chrono-Specific URDF
 
 **Status:** Accepted
 
-**Context:** Original Go1 URDF has a dummy `base` link and fixed `floating_base` joint. Chrono treats the fixed root as an anchor — robot hangs in the air.
+The original Go1 URDF has a dummy fixed root that Chrono imports as an anchor.
+`models/go1/go1_chrono.urdf` removes that dummy root so the trunk is the free
+body. Mesh paths are local.
 
-**Decision:** `models/go1/go1_chrono.urdf` — removes dummy root so `trunk` is the free body. Mesh paths converted from `package://go1_description/meshes/` to local paths.
+### ADR-003: Stable Chrono Home Pose
 
----
+**Status:** Accepted
 
-### ADR-003: Standing Reward
+The Menagerie home pose (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) slowly sank in
+this Chrono import even with zero policy action. Reward tuning was therefore
+fighting a bad neutral pose.
 
-**Status:** Building from scratch — see [docs/training_roadmap.md](docs/training_roadmap.md)
+Accepted baseline:
 
-**Decision:** `alive_bonus = +1.0` per surviving step. One term added per training run
-after full evaluation gate (`survival_rate=1.0`).
+```text
+home pose:    hip=0.0, thigh=0.7, calf=-1.4
+spawn height: 0.34 m
+```
 
-**Key tradeoff — terrain generalization:** A height score encodes a Y=0 ground
-assumption. On SCM deformable terrain the surface varies — a robot correctly
-holding its joints while sinking into soft soil would be penalised. `alive_bonus`
-is terrain-agnostic: any non-terminated step earns +1.0 regardless of absolute
-trunk height. This is the reason SCM fine-tuning (Stage 4) does not require a
-reward redesign.
-
----
+This pose starts at its natural support height and holds with zero action.
 
 ### ADR-004: Zero-Overhead Home-Pose Spawn
 
 **Status:** Accepted
 
-**Context:** `SetRootInitPose()` initialises only the root body — joints start at 0 rad. Setting motors to home angles before the first step causes a constraint-snap impulse that launches the robot.
-
-**Decision:** Chrono's built-in kinematic assembly solver:
+`SetRootInitPose()` only initializes the root. Joints initially start at zero.
+Instead of using a 500-step motor ramp, the env fixes the trunk, runs Chrono's
+position assembly solver, then unfixes the trunk:
 
 ```python
 self._trunk.SetFixed(True)
-system.DoAssembly(1)   # AssemblyAnalysis.POSITION — pure constraint satisfaction
+system.DoAssembly(1)
 self._trunk.SetFixed(False)
 ```
 
-Zero compute overhead. Robot spawns at home pose, drops ~0.08 m to the floor, settles.
-
-**Consequences:**
-- _Rejected: motor ramp_ — wasted 500 training steps per episode.
-- _Rejected: warm-up loop_ — ~5% per-episode overhead.
-- _Inspired by_ [harryzhang1018](https://github.com/harryzhang1018) /
-  [SBEL multi-terrain RL](https://github.com/uwsbel/sbel-reproducibility/tree/master/2025/multi-terrain-RL)
-  (UW-Madison SBEL, 2025).
-
----
+This places all position motors at the home pose before the first dynamics step.
 
 ### ADR-005: Collision Whitelist
 
 **Status:** Accepted
 
-**Context:** Enabling all non-fixed bodies caused solver explosions even with motors disabled.
+Enabling collision on every imported body caused solver explosions. The env
+enables only the external contact envelope: trunk, hips, thighs, calves, and
+feet. Rotor, camera, and marker bodies stay non-colliding.
 
-**Decision:** Disable all collision after import, then enable only the external contact envelope (trunk, hips, thighs, calves, feet). Rotor and sensor bodies stay disabled — matches MuJoCo Menagerie, which has no separate rotor collision bodies.
+### ADR-006: Standing Reward
 
----
+**Status:** Flat-ground v1 accepted
 
-### ADR-006: Full Rebuild On Reset
+The standing reward was rebuilt from scratch after joint observation and home
+pose bugs invalidated early training runs. Terms were added one at a time and
+kept only after evaluation.
+
+Important rejected paths:
+
+- Raising upright reward alone reduced lean but brought back more leg chatter.
+- Raising angular-velocity too much made the policy too constrained and unstable.
+- Raising control penalty too much reduced corrective authority and caused worse
+  tipping/spinning.
+- Pose penalty was not the main fix once pose error stayed near zero.
+
+Accepted lesson: separate the failure modes. Use `xz_vel` for ground-plane drift,
+`joint_vel` and `action_rate` for chatter, `ang_vel` for body motion, and `tilt`
+for persistent lean.
+
+### ADR-007: Full Rebuild On Reset
 
 **Status:** Accepted
 
-**Context:** SCM terrain deformation cannot be cleared in place.
-
-**Decision:** `reset()` tears down and rebuilds the entire Chrono system. `terrain="flat"` and `terrain="scm"` both use the same reset path.
+SCM terrain deformation cannot be cleared in place, so `reset()` rebuilds the
+Chrono system. Flat and SCM terrain use the same reset path.
 
 ## Roadmap
 
 ```text
-Stage 1  train_stand.py       flat terrain, fixed friction=0.8       ← active
-           ↳ position_penalty (0.5×Σxy²)
-           ↳ xy_vel_penalty (0.1×Σxy_vel²)
-Stage 2  train_stand.py       flat terrain, friction randomized (0.6–1.0)
+Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- active
+           -> flat-ground standing v1 accepted
+           -> next: reduce mild in-place shuffling
+Stage 2  train_stand.py       flat terrain, friction randomized
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills
@@ -165,15 +242,15 @@ Stage 7  hierarchy            skill selection and planning
 Immediate next steps:
 
 ```text
-1. retrain — pose_weight=0.15, no-ramp spawn, _SPAWN_HEIGHT=0.35
-2. evaluate — survival_rate=1.0, mean_reward ≈ 900–1000, trunk_y stable from step 0
-3. add position_penalty (0.5 × Σxy²), retrain, evaluate
-4. add xy_vel_penalty (0.1 × Σxy_vel²), retrain, evaluate
-5. friction randomization → Stage 2
+1. keep the current flat-ground standing model as v1
+2. tune one smoothness term at a time to reduce mild shuffling
+3. rerun fixed-friction evaluation after every reward edit
+4. start friction randomization once v1 smoothness is acceptable
+5. move to SCM only after flat randomized standing is stable
 ```
 
 ## Detailed Notes
 
-- [docs/training_roadmap.md](docs/training_roadmap.md) — reward decisions, diagnosis log, evaluation checklist
-- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) — Chrono port engineering notes
-- [docs/collision_debug_log.md](docs/collision_debug_log.md) — collision whitelist debug log
+- [docs/training_roadmap.md](docs/training_roadmap.md) - reward decisions, diagnosis log, evaluation checklist
+- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono port engineering notes
+- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision whitelist debug log

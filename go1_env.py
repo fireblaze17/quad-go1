@@ -35,21 +35,24 @@ _TERRAIN_LENGTH = 6.0
 _TERRAIN_WIDTH = 4.0
 _TERRAIN_DELTA = 0.04
 
-# At home angles (hip=0, thigh=0.9, calf=-1.8) the Menagerie trunk height is 0.27 m.
-# Spawn here so DoAssembly places feet at ~ground level — no free-fall, no impact pitch.
-_SPAWN_HEIGHT = 0.27  # trunk root height; DoAssembly drives legs to home before first step
-_TERM_HEIGHT = 0.15
-_UPRIGHT_WEIGHT         = 1.0
-_MIN_UPRIGHT_ALIGNMENT  = 0.75
-_POSE_PENALTY_WEIGHT    = 0.15  # penalise joint deviation from home pose
-_CONTROL_PENALTY_WEIGHT = 0.01  # penalise large actions — matches MuJoCo baseline
-_ANG_VEL_PENALTY_WEIGHT = 0.05  # penalise trunk angular velocity — matches MuJoCo baseline
-_ALIVE_BONUS            = 1.0   # reward per surviving step — matches MuJoCo; terrain-agnostic
+# Zero-action diagnostics showed the original Menagerie crouch
+# (hip=0, thigh=0.9, calf=-1.8 at y=0.27) slowly sank in Chrono. This less
+# crouched pose starts at its natural support height and holds with zero action.
+_SPAWN_HEIGHT = 0.34  # trunk root height; DoAssembly drives legs to home before first step
+_TERM_HEIGHT = 0.22
+_MIN_UPRIGHT_ALIGNMENT = 0.85
+_UPRIGHT_REWARD_WEIGHT = 0.15
+_ALIVE_BONUS = 1.0  # reward per surviving step; terrain-agnostic
+_POSE_PENALTY_WEIGHT = 0.10
+_CONTROL_PENALTY_WEIGHT = 0.03
+_ANG_VEL_PENALTY_WEIGHT = 0.01
+_XZ_VEL_PENALTY_WEIGHT = 0.20
+_JOINT_VEL_PENALTY_WEIGHT = 0.01
+_ACTION_RATE_PENALTY_WEIGHT = 0.01
+_TILT_PENALTY_WEIGHT = 0.25
 
-# MuJoCo Menagerie unitree_go1/go1.xml:
-# <key name="home" qpos="0 0 0.27 1 0 0 0 ..." ctrl="0 0.9 -1.8 ..."/>
 # Zero action holds this home control pose.
-_HOME_JOINT_ANGLES = np.tile([0.0, 0.9, -1.8], 4).astype(np.float32)
+_HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
 _ACTION_SCALE = 0.25
 
 # Joint limits from go1_chrono.urdf, in _JOINT_NAMES order.
@@ -64,10 +67,8 @@ _JOINT_HIGH = np.tile([0.863, 4.501, -0.888], 4).astype(np.float32)
 # the -90° spawn rotation → read component 0, sign=+1.
 # Thigh/calf rotate about URDF +Y (axis="0 1 0") → Chrono -Z after spawn.
 # For rotation θ about -Z: GetRotVec().z = -θ.
-# At home (thigh=0.9): GetRotVec().z = -0.9.
-# sign=-1 corrects this: reading = -1*(-0.9) = +0.9, matching _HOME_JOINT_ANGLES.
-# sign=+1 (tried and wrong): reading = -0.9 → pose_error = (-0.9-0.9)²=3.24 per joint
-#   → total pose_penalty ≈ 6.5/step → reward ≈ -6500/episode.
+# At home (thigh=0.7): GetRotVec().z = -0.7.
+# sign=-1 corrects this: reading = -1*(-0.7) = +0.7, matching _HOME_JOINT_ANGLES.
 _JOINT_AXES = np.array(
     [0, 2, 2,   # FR: hip=X, thigh=Z, calf=Z
      0, 2, 2,   # FL
@@ -146,6 +147,7 @@ class Go1Env(gym.Env):
         self.enable_motors = enable_motors
         self.friction_range = (float(friction_min), float(friction_max))
         self.ground_friction = None
+        self.home_joint_angles = _HOME_JOINT_ANGLES.copy()
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(37,), dtype=np.float32
@@ -161,6 +163,7 @@ class Go1Env(gym.Env):
         self._motor_funcs = []
         self._joint_body_pairs = []
         self._vis = None
+        self._prev_action = np.zeros(12, dtype=np.float32)
         self.step_count = 0
 
         self._build_sim()
@@ -298,12 +301,13 @@ class Go1Env(gym.Env):
         # — no ramp needed, matching SBEL's Go2 actuate() pattern.
         self._motor_funcs = []
         for i, motor in enumerate(self._motors):
-            function = chrono.ChFunctionConst(float(_HOME_JOINT_ANGLES[i]))
+            function = chrono.ChFunctionConst(float(self.home_joint_angles[i]))
             motor.SetMotorFunction(function)
             self._motor_funcs.append(function)
 
-        # ChLinkMotor's angle accessors are not exposed in this PyChrono build,
-        # so observations compute joint motion from the linked body frames.
+        # ChLinkMotor's direct angle accessors are not exposed in this PyChrono
+        # build. Motor frame rotation still gives the assembled joint angle;
+        # linked body pairs are kept only for the approximate velocity term.
         self._joint_body_pairs = (
             [(motor.GetBody1(), motor.GetBody2()) for motor in self._motors]
             if self.enable_motors else []
@@ -326,8 +330,8 @@ class Go1Env(gym.Env):
         vis.AddTypicalLights()
         self._vis = vis
 
-    def _joint_angle(self, b1, b2, axis_idx: int, sign: float) -> float:
-        """Revolute joint angle from relative body rotation.
+    def _joint_angle(self, motor, axis_idx: int, sign: float) -> float:
+        """Revolute joint angle from relative motor-frame rotation.
 
         Reads the component of the rotation vector along the joint's actual
         rotation axis in Chrono world space:
@@ -335,9 +339,9 @@ class Go1Env(gym.Env):
           axis_idx=2 (Z) for thigh/calf joints    (URDF axis="0 1 0" → Chrono -Z)
         sign corrects for URDF Y mapping to Chrono -Z.
         """
-        q1 = b1.GetRot()
-        q2 = b2.GetRot()
-        q_rel = q1.GetInverse() * q2
+        frame1 = motor.GetFrame1Abs()
+        frame2 = motor.GetFrame2Abs()
+        q_rel = frame1.GetRot().GetInverse() * frame2.GetRot()
         rv = q_rel.GetRotVec()
         components = (rv.x, rv.y, rv.z)
         return sign * float(components[axis_idx])
@@ -357,14 +361,18 @@ class Go1Env(gym.Env):
         lin_vel = self._trunk.GetPosDt()
         ang_vel = self._trunk.GetAngVelParent()
 
-        if self._joint_body_pairs:
+        if self._motors:
             joint_pos = np.array(
                 [
-                    self._joint_angle(b1, b2, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
-                    for i, (b1, b2) in enumerate(self._joint_body_pairs)
+                    self._joint_angle(motor, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
+                    for i, motor in enumerate(self._motors)
                 ],
                 dtype=np.float32,
             )
+        else:
+            joint_pos = np.zeros(12, dtype=np.float32)
+
+        if self._joint_body_pairs:
             joint_vel = np.array(
                 [
                     self._joint_vel(b1, b2, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
@@ -373,7 +381,6 @@ class Go1Env(gym.Env):
                 dtype=np.float32,
             )
         else:
-            joint_pos = np.zeros(12, dtype=np.float32)
             joint_vel = np.zeros(12, dtype=np.float32)
 
         return np.concatenate([
@@ -385,11 +392,6 @@ class Go1Env(gym.Env):
             joint_vel,
         ]).astype(np.float32)
 
-    def _trunk_up_alignment(self) -> float:
-        """Return trunk local-up alignment with Chrono world Y-up."""
-        trunk_up = self._trunk.GetRot().Rotate(chrono.ChVector3d(0, 0, 1))
-        return float(np.clip(trunk_up.y, -1.0, 1.0))
-
     def _trunk_axis_alignments(self) -> dict[str, float]:
         """Return each trunk local axis alignment with Chrono world Y-up."""
         rot = self._trunk.GetRot()
@@ -399,45 +401,89 @@ class Go1Env(gym.Env):
             "trunk_z_up": float(np.clip(rot.Rotate(chrono.ChVector3d(0, 0, 1)).y, -1.0, 1.0)),
         }
 
-    def _standing_reward(self, obs: np.ndarray, action: np.ndarray) -> tuple[float, dict]:
-        """Standing reward built one observed failure mode at a time."""
+    def _standing_reward(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        action_delta: np.ndarray,
+    ) -> tuple[float, dict]:
+        """Standing reward: survive while keeping the trunk upright."""
         if not np.all(np.isfinite(obs)):
             return -10.0, {"invalid_obs": 1.0}
 
         trunk_y = float(obs[1])
-        # Alive bonus: constant +1 per surviving step. Terrain-agnostic —
-        # works on flat and SCM deformable ground. Matches MuJoCo baseline.
+        trunk_lin_vel = obs[7:10]
+        trunk_ang_vel = obs[10:13]
+        axis_alignments = self._trunk_axis_alignments()
+        upright_score = max(0.0, axis_alignments["trunk_z_up"])
+        upright_reward = _UPRIGHT_REWARD_WEIGHT * upright_score
+        # Tilt penalty discourages the trunk from leaning while staying roughly upright.
+        tilt_error = (
+            axis_alignments["trunk_x_up"] ** 2
+            + axis_alignments["trunk_y_up"] ** 2
+        )
+        tilt_penalty = _TILT_PENALTY_WEIGHT * float(tilt_error)
+        # Pose penalty keeps joint positions near the home setting.
+        joint_pos = obs[13:25]
+        joint_vel = obs[25:37]
+        pose_error = joint_pos - self.home_joint_angles
+        pose_penalty = _POSE_PENALTY_WEIGHT * float(np.mean(pose_error ** 2))
+        # Joint velocity penalty discourages rapid leg oscillation around home.
+        joint_vel_penalty = _JOINT_VEL_PENALTY_WEIGHT * float(np.mean(joint_vel ** 2))
+        # Action-rate penalty discourages twitchy target changes.
+        action_rate_penalty = _ACTION_RATE_PENALTY_WEIGHT * float(np.mean(action_delta ** 2))
+        # Control penalty discourages large sustained commands.
+        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.mean(action ** 2))
+        # Angular velocity penalty discourages trunk roll, pitch, and yaw.
+        ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.mean(trunk_ang_vel ** 2))
+        # X/Z velocity penalty discourages shuffling on the Y-up ground plane.
+        xz_vel = trunk_lin_vel[[0, 2]]
+        xz_vel_penalty = _XZ_VEL_PENALTY_WEIGHT * float(np.mean(xz_vel ** 2))
         alive_bonus = _ALIVE_BONUS
 
-        # Upright: keep trunk vertical.
-        upright_score = max(0.0, self._trunk_up_alignment())
-
-        # Stage 3 reward: penalise joint deviation from home pose.
-        # Prevents the legs collapsing while trunk stays level (sinking loophole).
-        joint_pos = obs[13:25]  # indices in _get_obs: pos(3)+rot(4)+linvel(3)+angvel(3) = 13
-        pose_error = float(np.sum(np.square(joint_pos - _HOME_JOINT_ANGLES)))
-        pose_penalty = _POSE_PENALTY_WEIGHT * pose_error
-
-        # Stage 4 reward: penalise large actions — matches MuJoCo control_penalty.
-        # Discourages saturation (max_abs_action=1.0) and unnecessary joint motion.
-        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.sum(np.square(action)))
-
-        # Stage 5 reward: penalise trunk angular velocity — matches MuJoCo angular_velocity_penalty.
-        # obs[10:13] = trunk angular velocity in world frame.
-        ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.sum(np.square(obs[10:13])))
-
-        reward = float(alive_bonus + _UPRIGHT_WEIGHT * upright_score - pose_penalty - control_penalty - ang_vel_penalty)
+        reward = float(
+            alive_bonus
+            + upright_reward
+            - pose_penalty
+            - control_penalty
+            - joint_vel_penalty
+            - action_rate_penalty
+            - tilt_penalty
+            - ang_vel_penalty
+            - xz_vel_penalty
+        )
 
         terms = {
             "alive_bonus": alive_bonus,
             "upright_score": float(upright_score),
-            "pose_error": pose_error,
-            "pose_penalty": pose_penalty,
-            "control_penalty": control_penalty,
-            "ang_vel_penalty": ang_vel_penalty,
+            "upright_reward": float(upright_reward),
             "trunk_y": trunk_y,
+            "tilt_error": float(tilt_error),
+            "tilt_penalty": float(tilt_penalty),
+            "pose_penalty": float(pose_penalty),
+            "pose_error": float(np.mean(pose_error ** 2)),
+            "mean_abs_joint_vel": float(np.mean(np.abs(joint_vel))),
+            "max_abs_joint_vel": float(np.max(np.abs(joint_vel))),
+            "joint_vel_penalty": float(joint_vel_penalty),
+            "action_rate_penalty": float(action_rate_penalty),
+            "mean_abs_action_delta": float(np.mean(np.abs(action_delta))),
+            "max_abs_action_delta": float(np.max(np.abs(action_delta))),
+            "control_penalty": float(control_penalty),
+            "mean_abs_action": float(np.mean(np.abs(action))),
+            "max_abs_action": float(np.max(np.abs(action))),
+            "ang_vel_penalty": float(ang_vel_penalty),
+            "mean_abs_ang_vel": float(np.mean(np.abs(trunk_ang_vel))),
+            "max_abs_ang_vel": float(np.max(np.abs(trunk_ang_vel))),
+            "ang_vel_x": float(trunk_ang_vel[0]),
+            "ang_vel_y": float(trunk_ang_vel[1]),
+            "ang_vel_z": float(trunk_ang_vel[2]),
+            "xz_vel_penalty": float(xz_vel_penalty),
+            "mean_abs_xz_vel": float(np.mean(np.abs(xz_vel))),
+            "max_abs_xz_vel": float(np.max(np.abs(xz_vel))),
+            "lin_vel_x": float(trunk_lin_vel[0]),
+            "lin_vel_z": float(trunk_lin_vel[2]),
         }
-        terms.update(self._trunk_axis_alignments())
+        terms.update(axis_alignments)
         return reward, terms
 
     def _termination_reason(self, obs: np.ndarray, reward_terms: dict) -> str | None:
@@ -445,8 +491,8 @@ class Go1Env(gym.Env):
             return "invalid_obs"
         if float(obs[1]) < _TERM_HEIGHT:
             return "height"
-        # Stage 3 termination: falling forward/sideways is a failure, not just
-        # a low-reward pose.
+        # Upright termination stays outside the reward so tipping is still a
+        # failure while the reward baseline remains terrain-agnostic.
         if reward_terms.get("upright_score", 1.0) < _MIN_UPRIGHT_ALIGNMENT:
             return "tip"
         return None
@@ -458,6 +504,7 @@ class Go1Env(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._build_sim()
+        self._prev_action = np.zeros(12, dtype=np.float32)
         self.step_count = 0
         return self._get_obs(), self._info()
 
@@ -465,8 +512,9 @@ class Go1Env(gym.Env):
         self.step_count += 1
 
         clipped_action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        action_delta = clipped_action - self._prev_action
         if self.enable_motors:
-            desired_targets = _HOME_JOINT_ANGLES + _ACTION_SCALE * clipped_action
+            desired_targets = self.home_joint_angles + _ACTION_SCALE * clipped_action
             targets = np.clip(desired_targets, _JOINT_LOW, _JOINT_HIGH)
             for function, target in zip(self._motor_funcs, targets):
                 function.SetConstant(float(target))
@@ -481,11 +529,12 @@ class Go1Env(gym.Env):
 
         obs = self._get_obs()
         truncated = self.step_count >= self.max_steps
-        reward, reward_terms = self._standing_reward(obs, clipped_action)
+        reward, reward_terms = self._standing_reward(obs, clipped_action, action_delta)
         termination_reason = self._termination_reason(obs, reward_terms)
         terminated = termination_reason is not None
         if terminated:
             reward -= 5.0
+        self._prev_action = clipped_action.copy()
 
         info = self._info()
         info["target_joint_angles"] = targets
