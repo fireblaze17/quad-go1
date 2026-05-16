@@ -1,0 +1,19 @@
+name: chrono-go1
+channels:
+  - projectchrono
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pychrono=10.0.0
+  - numpy=2.4
+  - assimp
+  - irrlicht
+  - urdfdom
+  - pip
+  - pip:
+      - gymnasium==1.2.3
+      - stable-baselines3==2.8.0
+      - torch==2.11.0
+      - matplotlib==3.10.9
+      - pandas==3.0.2

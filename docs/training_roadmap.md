@@ -26,6 +26,7 @@ reward = (
     - tilt_penalty
     - ang_vel_penalty
     - xz_vel_penalty
+    - foot_contact_penalty
 )
 ```
 
@@ -34,35 +35,62 @@ Current weights:
 ```text
 alive_bonus             1.00
 upright_reward          0.15 * upright_score
-pose_penalty            0.10 * mean(joint_error^2)
+pose_penalty            0.30 * mean(joint_error^2)
 control_penalty         0.03 * mean(action^2)
 joint_vel_penalty       0.01 * mean(joint_velocity^2)
-action_rate_penalty     0.01 * mean(action_delta^2)
+action_rate_penalty     0.03 * mean(action_delta^2)
 tilt_penalty            0.25 * (trunk_x_up^2 + trunk_y_up^2)
 angular_vel_penalty     0.01 * mean(trunk_angular_velocity^2)
 xz_vel_penalty          0.20 * mean([vx, vz]^2)
+foot_contact_penalty    0.10 * mean(missing_foot_load^2)
+minimum foot load       20 N per foot before penalty is zero
 ```
 
-Current evaluation checkpoint:
+`leg_symmetry_error` remains in reward logs as a diagnostic only. It is not an
+active reward term in the accepted baseline.
+
+Current accepted checkpoint:
 
 ```text
 survival_rate:       1.000
 mean_length:         1000.0
-min_trunk_y:         0.336
-min_upright_score:   0.994
-mean_abs_xz_vel:     0.040
-mean_abs_joint_vel:  0.283
-mean_abs_action:     0.380
+min_trunk_y:         0.337
+min_upright_score:   1.000
+mean_abs_xz_vel:     0.007
+mean_abs_joint_vel:  0.393
+mean_abs_action:     0.304
+mean_foot_load:      32.09 N
+min_foot_load:       17.58 N
 termination:         truncated only
 ```
 
-Conclusion: flat-ground standing v1 is accepted. It is not perfect: there is
-still mild in-place leg chatter. But the policy stands upright, does not sink,
-does not drift into a fall, and no longer settles into a large one-sided lean.
+Conclusion: flat-ground standing v2 is accepted. It stands upright, keeps all
+four feet near the ground, has no visible vibration in the viewer, and uses zero
+non-foot contact after the collision whitelist change.
 
 ---
 
-## ADR-001: Reward Term 1 - `alive_bonus`
+## What Actually Solved The Standing Problem
+
+The final fix was a chain, not a single magic reward weight:
+
+1. Fix the home pose and spawn height so zero action is already physically sane.
+2. Fix joint observations so pose error is real, not a frame-sign artifact.
+3. Add viewer diagnostics for action rate, joint velocity, foot slip, foot load,
+   foot height, and non-foot link contact.
+4. Discover that hip/thigh/calf collision contact was supporting the policy.
+5. Disable hip/thigh/calf terrain collisions, keeping trunk and feet collidable.
+6. Retrain and discover the policy could still unload one foot.
+7. Add a weak four-foot support penalty based on contact load.
+
+This is why tuning symmetry, angular velocity, or action rate alone did not
+fully solve the issue. Those terms shaped motion, but the root problem was that
+the policy had access to bad support modes and did not care whether every foot
+was actually participating.
+
+---
+
+## ADR-001: Reward Term - `alive_bonus`
 
 **Status:** Accepted
 
@@ -70,22 +98,21 @@ does not drift into a fall, and no longer settles into a large one-sided lean.
 assumes a flat Y=0 ground plane. That is fragile for Chrono SCM terrain, where
 the foot-ground interface can sink or deform.
 
-**Decision:** Use terrain-agnostic survival reward:
+**Decision:**
 
 ```python
 alive_bonus = 1.0
 ```
 
 **Why it worked:** it creates a simple base objective: remain in a valid standing
-episode for 1000 steps. Height and tilt stay as termination conditions or
-specialized penalties, not the main reward source.
+episode for 1000 steps.
 
 **Tradeoff:** alive reward alone is sparse. It does not distinguish clean
-standing from barely surviving, so shaping terms are still required.
+standing from barely surviving, so shaping terms are required.
 
 ---
 
-## ADR-002: Reward Term 2 - `upright_reward`
+## ADR-002: Reward Term - `upright_reward`
 
 **Status:** Accepted at low weight
 
@@ -102,47 +129,47 @@ upright_reward = 0.15 * upright_score
 Chrono is Y-up, so `trunk_z_up` means the trunk local Z axis dotted against
 world Y.
 
-**What did not work:** increasing upright weight to 0.25 reduced visible lean,
-but it also brought back more leg shuffling. Upright reward is too broad: it
-encourages the policy to correct the trunk, but does not say how to correct it.
+**What did not work:** increasing upright weight reduced visible lean in one run
+but brought back more leg shuffling. Upright reward is broad: it says "be
+vertical" but not "use four clean foot contacts."
 
-**Tradeoff:** the accepted 0.15 weight is intentionally modest. A separate tilt
-penalty now handles persistent lean more directly.
+**Tradeoff:** the accepted 0.15 weight is intentionally modest. Tilt and support
+terms handle more specific failure modes.
 
 ---
 
-## ADR-003: Reward Term 3 - `pose_penalty`
+## ADR-003: Reward Term - `pose_penalty`
 
-**Status:** Accepted at low weight
+**Status:** Accepted at 0.30
 
-**Context:** Early alive/upright policies could keep the trunk mostly vertical
-while using odd leg configurations. Once the joint observation bug was fixed,
-pose error became meaningful.
+**Context:** Early policies could keep the trunk mostly vertical while using odd
+leg configurations. Once the joint observation bug was fixed, pose error became
+meaningful.
 
 **Decision:**
 
 ```python
 pose_error = joint_pos - home_joint_angles
-pose_penalty = 0.10 * mean(pose_error**2)
+pose_penalty = 0.30 * mean(pose_error**2)
 ```
 
 **What worked:** pose penalty keeps the legs near the known stable Chrono home
 stance.
 
-**What did not work:** trying to solve later falling/shuffling by increasing
-pose weight was the wrong diagnosis. Current failures showed tiny pose error,
-so the legs were near home while the body drifted or leaned.
+**What did not work:** pose penalty alone did not force the lifted-looking foot
+back into useful contact. The policy could still hold a bad support pattern near
+home.
 
 **Tradeoff:** pose penalty preserves Go1-like geometry, but too much pose
 regularization can fight necessary balance corrections.
 
 ---
 
-## ADR-004: Reward Term 4 - `control_penalty`
+## ADR-004: Reward Term - `control_penalty`
 
 **Status:** Accepted at 0.03
 
-**Context:** The policy often used saturated action targets. A control penalty
+**Context:** The policy often used large action targets. A control penalty
 discourages large sustained commands.
 
 **Decision:**
@@ -153,14 +180,14 @@ control_penalty = 0.03 * mean(action**2)
 
 **What did not work:** larger control weights reduced corrective authority and
 made the robot tip or spin sooner. The problem was not simply "actions are too
-large"; the timing and physical motion of the legs also mattered.
+large"; the contact mode mattered more.
 
 **Tradeoff:** this term should stay conservative. It helps keep commands
-reasonable, but it cannot remove chatter by itself.
+reasonable, but it cannot remove chatter or contact exploits by itself.
 
 ---
 
-## ADR-005: Reward Term 5 - `xz_vel_penalty`
+## ADR-005: Reward Term - `xz_vel_penalty`
 
 **Status:** Accepted
 
@@ -174,18 +201,15 @@ xz_vel = trunk_lin_vel[[0, 2]]
 xz_vel_penalty = 0.20 * mean(xz_vel**2)
 ```
 
-**Why 0.20:** the old MuJoCo reference used a sum-style horizontal velocity
-penalty. This code uses `mean`, so 0.20 over two axes gives a similar scale.
+**Why it worked:** it reduced ground-plane drift after the standing controller
+was already viable.
 
-**What worked:** mean X/Z velocity dropped into the acceptable range around
-0.04 in the flat-ground v1 checkpoint.
-
-**Tradeoff:** it reduces ground-plane drift, but it does not directly prevent
-lean or leg chatter.
+**Tradeoff:** it does not directly prevent lean, vibration, or a foot from being
+unloaded. It is a drift term, not a contact term.
 
 ---
 
-## ADR-006: Reward Term 6 - `ang_vel_penalty`
+## ADR-006: Reward Term - `ang_vel_penalty`
 
 **Status:** Accepted at low weight
 
@@ -200,42 +224,14 @@ ang_vel_penalty = 0.01 * mean(trunk_ang_vel**2)
 ```
 
 **What did not work:** increasing angular-velocity weight too far made the robot
-too constrained. It reduced motion but could also make the policy less able to
-recover, causing quiet sinking or tipping.
+too constrained. It reduced some motion but could cause quiet tilting or falling.
 
-**Tradeoff:** angular velocity is useful as a damping signal, not as the main
-standing objective.
-
----
-
-## ADR-007: Joint-Velocity Diagnostics
-
-**Status:** Diagnostic accepted; later became ADR-008 reward term
-
-**Context:** After the corrected home pose, the robot could survive but still
-visibly shuffled. Pose error stayed low, so the legs were not drifting far from
-home; they were likely moving quickly around home.
-
-**Decision:** Add telemetry:
-
-```python
-mean_abs_joint_vel = mean(abs(joint_vel))
-max_abs_joint_vel = max(abs(joint_vel))
-```
-
-`view_stand_policy.py` prints these as `jvel_mean` and `jvel_max`.
-
-**Result:** the telemetry lined up with visible leg chatter, so joint velocity
-became a real reward term.
-
-**Tradeoff:** joint velocity still comes from the linked-body approximation while
-joint position comes from motor frames. That is acceptable for the current
-smoothness signal, but should be revisited if this term becomes central to later
-walking.
+**Tradeoff:** angular velocity is a damping signal, not the main standing
+objective.
 
 ---
 
-## ADR-008: Reward Term 7 - `joint_vel_penalty`
+## ADR-007: Reward Term - `joint_vel_penalty`
 
 **Status:** Accepted
 
@@ -249,90 +245,142 @@ joint_vel_penalty = 0.01 * mean(joint_vel**2)
 ```
 
 **What worked:** joint velocity penalty reduced some oscillation and improved
-the smoothness metrics.
+smoothness metrics.
 
-**What did not fully work:** by itself, it did not eliminate shuffling. One run
-also introduced yaw/turn bias, showing that smoothing the legs can change how
-the body finds balance.
+**What did not work:** it did not fix the lifted-foot stance. Diagnostics later
+showed that issue was contact/support, not just velocity.
 
 **Tradeoff:** this term makes the policy calmer, but too much could prevent fast
-recovery motions later during perturbations, rough terrain, or walking.
+recovery motions during perturbations, rough terrain, or walking.
 
 ---
 
-## ADR-009: Reward Term 8 - `action_rate_penalty`
+## ADR-008: Reward Term - `action_rate_penalty`
 
-**Status:** Accepted for standing v1
+**Status:** Accepted at 0.03
 
 **Context:** Joint-velocity penalty measures physical leg motion. It does not
-directly punish twitchy target changes from the policy. The viewer showed
-nontrivial action deltas during visible shuffling.
+directly punish twitchy target changes from the policy.
 
-**Decision:** Store the previous clipped action in the env and penalize target
-changes:
+**Decision:**
 
 ```python
 action_delta = clipped_action - prev_action
-action_rate_penalty = 0.01 * mean(action_delta**2)
+action_rate_penalty = 0.03 * mean(action_delta**2)
 ```
 
 `reset()` clears `prev_action` to zeros.
 
-**What worked:** action delta dropped and the robot became smoother in the
-accepted v1 run.
+**What worked:** action rate reduced turning and large target jumps. It helped
+the policy look less twitchy.
 
-**Consequence:** the environment now has one step of action memory. That is
-normal for rate penalties, but it means reset behavior must always clear the
-previous action.
+**What did not work:** action rate did not solve the raised-foot stance. The
+policy could be smooth and still choose a bad support pattern.
 
-**Tradeoff:** rate penalties can make a policy slower to react. Keep this term
-small until perturbation recovery is tested.
+**Tradeoff:** rate penalties can make a policy slower to react. Keep watching it
+when perturbations, friction randomization, and walking are added.
 
 ---
 
-## ADR-010: Reward Term 9 - `tilt_penalty`
+## ADR-009: Reward Term - `tilt_penalty`
 
 **Status:** Accepted
 
-**Context:** After X/Z velocity, joint velocity, action rate, and low upright
-reward, the robot survived but settled into a biased lean. Raising upright
-reward helped lean but brought back more shuffling. Upright reward was too
-blunt.
+**Context:** The robot survived but sometimes settled into a biased lean.
+Raising upright reward was too blunt and brought back more shuffling.
 
-**Decision:** Add a direct trunk tilt penalty:
+**Decision:**
 
 ```python
 tilt_error = trunk_x_up**2 + trunk_y_up**2
 tilt_penalty = 0.25 * tilt_error
 ```
 
-This is separate from `upright_score`. It directly punishes non-up trunk axes
-having world-up components.
+**Why it worked:** tilt directly punishes the non-up trunk axes having world-up
+components. It fixed persistent lean better than simply raising upright reward.
 
-**Why it worked:** the earlier leaning runs had average `trunk_y_up` around
-0.15 in one direction or the other. After adding tilt penalty, the accepted v1
-run had:
-
-```text
-trunk_y_up mean:  -0.042
-tilt_error mean:  0.0037
-min_upright:      0.994
-survival:         1.000
-```
-
-**Tradeoff:** tilt penalty fixes lean but does not directly remove leg chatter.
-That is why v1 is stable but still not perfectly smooth.
+**Tradeoff:** tilt penalty fixes lean, not contact support. It is still useful
+after the contact fixes because it keeps the trunk centered.
 
 ---
 
-## ADR-011: Home Pose Baseline - Less-Crouched Stance
+## ADR-010: Diagnostic Term - `leg_symmetry_error`
+
+**Status:** Disabled after testing
+
+**Context:** The policy appeared to tuck and load one side differently. A weak
+leg symmetry penalty was tested because it is more terrain-safe than absolute
+foot-height balance.
+
+**Tested decision:**
+
+```python
+leg_symmetry_error = 0.5 * (
+    mean((FR_q - FL_q)**2) + mean((RR_q - RL_q)**2)
+)
+tested_penalty = weight * leg_symmetry_error
+```
+
+**What happened:**
+
+- `0.05` was a weak guardrail but did not fix the lifted-foot stance.
+- `0.20`, `0.25`, and `0.30` did not force clean contact and increased wobble.
+- After disabling non-foot collisions and adding foot support, the symmetry
+  error naturally dropped near `0.0017`.
+
+**Decision:** remove the zero-weight penalty from the reward path and keep
+`leg_symmetry_error` in reward logs as a diagnostic only.
+
+**Tradeoff:** disabling it allows small corrective asymmetries. If walking later
+develops pathological asymmetry, revisit this as a weak regularizer, not as a
+standing fix.
+
+---
+
+## ADR-011: Reward Term - `foot_contact_penalty`
+
+**Status:** Accepted
+
+**Context:** After hip/thigh/calf collisions were disabled, the old support
+exploit disappeared, but the policy learned a different bad solution: stand
+with one foot unloaded. The viewer showed `FL foot_load=0.0` even though the
+robot survived.
+
+**Decision:** require every foot to carry at least a small amount of load:
+
+```python
+foot_loads = [abs(foot.GetContactForce().y) for foot in feet]
+missing_contact = max(0.0, MIN_FOOT_LOAD - foot_load) / MIN_FOOT_LOAD
+foot_contact_error = mean(missing_contact**2)
+foot_contact_penalty = 0.10 * foot_contact_error
+```
+
+Current threshold:
+
+```text
+MIN_FOOT_LOAD = 20 N
+```
+
+**Why it worked:** it attacks the real failure directly. The policy no longer
+gets full credit for standing while one foot is floating or unused.
+
+**Why this is better than foot-height reward:** SCM terrain can be uneven and
+deformable. Feet can legitimately sit at different world Y heights. Contact load
+is a better standing support signal than absolute foot height.
+
+**Tradeoff:** contact-force rewards depend on the contact model, material, and
+soil behavior. The threshold is deliberately low so it means "participate in
+support," not "perfect equal load sharing."
+
+---
+
+## ADR-012: Home Pose Baseline - Less-Crouched Stance
 
 **Status:** Accepted
 
 **Context:** Zero action means "hold the position-control home pose." The
 original Menagerie pose (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) looked plausible
-but sank under zero action in Chrono. Reward tuning was compensating for a bad
-neutral pose.
+but sank under zero action in Chrono.
 
 **Decision:**
 
@@ -350,10 +398,9 @@ sbel_sign_adjusted @ 0.34: y 0.340 -> settles near 0.317
 sbel_sign_adjusted @ 0.36: y 0.360 -> settles near 0.314
 ```
 
-`less_crouched @ 0.34` starts closest to its natural support height.
-
 **Tradeoffs:**
-- It departs from the exact MuJoCo Menagerie home keyframe.
+
+- It departs from the exact MuJoCo Menagerie keyframe.
 - It remains inside Go1 joint limits and is mechanically stable in this Chrono
   import.
 - Zero-action standing does not make the policy pointless. The policy becomes a
@@ -362,7 +409,30 @@ sbel_sign_adjusted @ 0.36: y 0.360 -> settles near 0.314
 
 ---
 
-## ADR-012: Joint Observation Source - Motor Frames
+## ADR-013: Action Scale
+
+**Status:** Accepted at 0.20
+
+**Context:** With `0.25`, the policy had enough authority but often moved feet
+too much while balancing. Reducing the scale was tested after contact diagnostics
+showed the issue was not only reward shaping.
+
+**Decision:**
+
+```python
+target = home + 0.20 * clipped_action
+```
+
+**What worked:** smaller normalized offsets reduced stance excursions and made
+the final foot-contact policy calmer.
+
+**Tradeoff:** too small an action scale could limit recovery and walking later.
+For standing, 0.20 is a good baseline. Revisit for walking if the policy cannot
+step far enough.
+
+---
+
+## ADR-014: Joint Observation Source - Motor Frames
 
 **Status:** Accepted
 
@@ -387,7 +457,7 @@ tuning.
 
 ---
 
-## ADR-013: Tip Termination Threshold
+## ADR-015: Tip Termination Threshold
 
 **Status:** Accepted for current standing stage
 
@@ -402,7 +472,58 @@ _MIN_UPRIGHT_ALIGNMENT = 0.85
 
 **Tradeoff:** this gives PPO more recovery data. Evaluation still tracks
 `min_upright_score`, so a policy that exploits the looser threshold is visible.
-The current v1 policy stays far above the threshold (`min_upright_score=0.994`).
+The current v2 policy stays far above the threshold.
+
+---
+
+## Diagnostics Added During This Phase
+
+`view_stand_policy.py` is intentionally richer than `evaluate_stand.py`. The
+viewer answers "what is physically happening right now?" while evaluation
+summarizes episode-level metrics.
+
+Current viewer diagnostics:
+
+```text
+height, upright, xz_vel
+act_mean, dact_mean
+jvel_mean
+sym, tilt, pose_err
+foot_dxz_mean/max
+foot_vxz_mean/max
+load_imb
+foot_y
+foot_share
+foot_dxz
+foot_load
+calf_load, thigh_load, hip_load
+leg_nonfoot_load
+foot_y_min/max over interval
+foot_load_min/max over interval
+nonfoot_load_max over interval
+```
+
+Important interpretation rules:
+
+- `foot_dxz` growing while `xz_vel` is small means feet are sliding/skittering
+  under the body.
+- `dact_mean` high means the policy target is twitching.
+- `jvel_mean` high with low `dact_mean` points toward motor/contact dynamics.
+- `calf/thigh/hip load` above zero means the robot is using non-foot terrain
+  support.
+- `foot_load=0` on one foot means survival is not enough; support must be
+  rewarded directly.
+
+Final accepted viewer signature:
+
+```text
+nonfoot_load_max = 0 on every leg
+all four feet near the same world Y
+no foot permanently at zero load
+foot_dxz_mean around 0.015 after settling
+upright around 1.000
+no visible vibration
+```
 
 ---
 
@@ -425,25 +546,26 @@ After each retrain:
 survival_rate = 1.0
 mean_length = 1000
 min_trunk_y > 0.22
-min_upright_score ideally > 0.95, v1 target > 0.99
+min_upright_score > 0.99 for the standing baseline
 mean_abs_xz_vel low/stable
 mean_abs_joint_vel low/stable
-mean_abs_action_delta low/stable
+mean_abs_action_delta not exploding
 mean_abs_action below saturation
-max_abs_action not constantly clipped
+min_foot_load not stuck at zero
+foot_contact_error low/stable
 termination_reasons = {'truncated': episodes}
 ```
 
 Viewer diagnostics to watch:
 
 ```text
-axis=(trunk_x_up, trunk_y_up, trunk_z_up)  lean direction
-ang_xyz                                  body angular velocity
-xz_vel                                   ground-plane drift
-dact_mean/dact_max                        target twitchiness
-jvel_mean/jvel_max                        physical leg chatter
-tilt                                     lean penalty input
-pen=(...)                                reward term scale comparison
+foot_y                                  visual stance height per foot
+foot_load / foot_share                  whether every foot participates
+foot_dxz / foot_vxz                     slip and skitter
+calf/thigh/hip load                     hidden non-foot support
+dact_mean                               target twitchiness
+jvel_mean                               physical leg chatter
+tilt                                    trunk lean
 ```
 
 ---
@@ -473,10 +595,8 @@ C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/st
 ## Roadmap
 
 ```text
-Stage 1  train_stand.py       flat terrain, fixed friction=0.8
-           -> flat-ground standing v1 accepted
-           -> next: reduce mild in-place shuffling
-Stage 2  train_stand.py       flat terrain, randomized friction
+Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
+Stage 2  train_stand.py       flat terrain, randomized friction      <- next
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills

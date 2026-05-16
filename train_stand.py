@@ -1,13 +1,14 @@
 """Train a standing policy for the Chrono Go1 environment."""
 
 import argparse
+import json
 from pathlib import Path
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 
-from go1_env import Go1Env
+from go1_env import Go1Env, standing_env_metadata
 
 
 def parse_args():
@@ -33,9 +34,28 @@ def make_env(args):
     return Monitor(env)
 
 
+def _json_ready_args(args) -> dict:
+    data = vars(args).copy()
+    data["save_dir"] = str(data["save_dir"])
+    data["load"] = None if data["load"] is None else str(data["load"])
+    return data
+
+
+def save_run_metadata(args) -> None:
+    (args.save_dir / "args.json").write_text(
+        json.dumps(_json_ready_args(args), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (args.save_dir / "env_constants.json").write_text(
+        json.dumps(standing_env_metadata(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     args = parse_args()
     args.save_dir.mkdir(parents=True, exist_ok=True)
+    save_run_metadata(args)
 
     env = make_env(args)
     if args.load is not None:

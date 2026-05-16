@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from diagnostics import FOOT_BODY_NAMES, foot_bodies, foot_debug_stats, foot_xz_positions
 from go1_env import Go1Env
 
 
@@ -11,7 +12,13 @@ MAX_STEPS = 1000
 LOG_INTERVAL = 100
 
 
-def print_step(episode: int, step: int, action: np.ndarray, info: dict) -> None:
+def print_step(
+    episode: int,
+    step: int,
+    action: np.ndarray,
+    info: dict,
+    foot_stats: dict,
+) -> None:
     terms = info.get("reward_terms", {})
     print(
         f"ep={episode:03d} step={step:04d} "
@@ -30,7 +37,11 @@ def print_step(episode: int, step: int, action: np.ndarray, info: dict) -> None:
         f"jvel_max={float(terms.get('max_abs_joint_vel', 0.0)):.3f} "
         f"dact_mean={float(terms.get('mean_abs_action_delta', 0.0)):.3f} "
         f"dact_max={float(terms.get('max_abs_action_delta', 0.0)):.3f} "
-        f"amax={float(np.abs(action).max()):.3f}"
+        f"amax={float(np.abs(action).max()):.3f} "
+        f"foot_dxz_mean={foot_stats['foot_dxz_mean']:.4f} "
+        f"foot_dxz_max={foot_stats['foot_dxz_max']:.4f} "
+        f"foot_vxz_mean={foot_stats['foot_vxz_mean']:.4f} "
+        f"foot_vxz_max={foot_stats['foot_vxz_max']:.4f}"
     )
 
 
@@ -41,11 +52,15 @@ def main() -> None:
         terrain=TERRAIN,
         enable_motors=ENABLE_MOTORS,
     )
+    env.reset()
+    tracked_feet = foot_bodies(env)
+    reset_foot_xz = foot_xz_positions(tracked_feet)
 
     print(
         f"viewing zero-action env terrain={TERRAIN} "
         f"motors={'on' if ENABLE_MOTORS else 'off'}"
     )
+    print(f"tracking feet={', '.join(FOOT_BODY_NAMES)}")
     step = 0
     episode = 1
 
@@ -55,7 +70,8 @@ def main() -> None:
             _, _, terminated, truncated, info = env.step(action)
 
             if step % LOG_INTERVAL == 0:
-                print_step(episode, step, action, info)
+                foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz)
+                print_step(episode, step, action, info, foot_stats)
 
             if terminated or truncated:
                 print(
@@ -64,6 +80,8 @@ def main() -> None:
                     f"steps={step + 1}"
                 )
                 env.reset()
+                tracked_feet = foot_bodies(env)
+                reset_foot_xz = foot_xz_positions(tracked_feet)
                 step = 0
                 episode += 1
             else:

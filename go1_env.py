@@ -43,27 +43,27 @@ _TERM_HEIGHT = 0.22
 _MIN_UPRIGHT_ALIGNMENT = 0.85
 _UPRIGHT_REWARD_WEIGHT = 0.15
 _ALIVE_BONUS = 1.0  # reward per surviving step; terrain-agnostic
-_POSE_PENALTY_WEIGHT = 0.10
+_POSE_PENALTY_WEIGHT = 0.30
 _CONTROL_PENALTY_WEIGHT = 0.03
 _ANG_VEL_PENALTY_WEIGHT = 0.01
 _XZ_VEL_PENALTY_WEIGHT = 0.20
 _JOINT_VEL_PENALTY_WEIGHT = 0.01
-_ACTION_RATE_PENALTY_WEIGHT = 0.01
+_ACTION_RATE_PENALTY_WEIGHT = 0.03
 _TILT_PENALTY_WEIGHT = 0.25
+_FOOT_CONTACT_PENALTY_WEIGHT = 0.10
+_MIN_FOOT_LOAD = 20.0
 
 # Zero action holds this home control pose.
 _HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
-_ACTION_SCALE = 0.25
+_ACTION_SCALE = 0.20
 
 # Joint limits from go1_chrono.urdf, in _JOINT_NAMES order.
 _JOINT_LOW = np.tile([-0.863, -0.686, -2.818], 4).astype(np.float32)
 _JOINT_HIGH = np.tile([0.863, 4.501, -0.888], 4).astype(np.float32)
 
-# Revolute joint names. This order is shared by actions, observations, limits,
-# and home targets, so keep it synchronized with go1_chrono.urdf.
-# Also defines which component of the rotation vector to read for each joint.
-# GetRotVec() returns axis*angle in the relative frame.
-# Hip joints rotate about URDF X (axis="1 0 0"), which stays Chrono X after
+# Joint order is shared by actions, observations, limits, and home targets.
+# The axis/sign arrays convert Chrono motor-frame rotation vectors back to
+# URDF joint angles; see docs/chrono_port_notes.md ADR-008 for the derivation.
 # the -90° spawn rotation → read component 0, sign=+1.
 # Thigh/calf rotate about URDF +Y (axis="0 1 0") → Chrono -Z after spawn.
 # For rotation θ about -Z: GetRotVec().z = -θ.
@@ -76,8 +76,7 @@ _JOINT_AXES = np.array(
      0, 2, 2],  # RL
     dtype=np.int32,
 )
-# Hip: sign=+1 (X component directly correct).
-# Thigh/calf: sign=-1 (negates the Chrono -Z rotation sign back to URDF convention).
+# Hips read Chrono X directly; thigh/calf URDF Y maps to Chrono -Z.
 _JOINT_AXIS_SIGN = np.where(_JOINT_AXES == 0, 1.0, -1.0).astype(np.float32)
 _JOINT_NAMES = [
     "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
@@ -86,16 +85,53 @@ _JOINT_NAMES = [
     "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
 ]
 
-# External contact shell. We intentionally leave rotors and sensor marker bodies
-# non-colliding because they are internal/reference geometry, not terrain-contact
-# surfaces. See docs/collision_debug_log.md for the debugging history.
+# See docs/collision_debug_log.md for why only trunk and feet collide.
 _ROBOT_COLLISION_BODIES = (
     "trunk",
-    "FR_hip", "FL_hip", "RR_hip", "RL_hip",
-    "FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh",
-    "FR_calf", "FL_calf", "RR_calf", "RL_calf",
     "FR_foot", "FL_foot", "RR_foot", "RL_foot",
 )
+_FOOT_BODY_NAMES = ("FR_foot", "FL_foot", "RR_foot", "RL_foot")
+
+
+def standing_env_metadata() -> dict:
+    """Return the public training metadata needed to reproduce standing runs."""
+    return {
+        "time_step": _TIME_STEP,
+        "spawn_height": _SPAWN_HEIGHT,
+        "home_joint_angles": _HOME_JOINT_ANGLES.tolist(),
+        "action_scale": _ACTION_SCALE,
+        "collision_bodies": list(_ROBOT_COLLISION_BODIES),
+        "reward_weights": {
+            "alive_bonus": _ALIVE_BONUS,
+            "upright": _UPRIGHT_REWARD_WEIGHT,
+            "pose": _POSE_PENALTY_WEIGHT,
+            "control": _CONTROL_PENALTY_WEIGHT,
+            "joint_velocity": _JOINT_VEL_PENALTY_WEIGHT,
+            "action_rate": _ACTION_RATE_PENALTY_WEIGHT,
+            "tilt": _TILT_PENALTY_WEIGHT,
+            "angular_velocity": _ANG_VEL_PENALTY_WEIGHT,
+            "xz_velocity": _XZ_VEL_PENALTY_WEIGHT,
+            "foot_contact": _FOOT_CONTACT_PENALTY_WEIGHT,
+        },
+        "minimum_foot_load": _MIN_FOOT_LOAD,
+        "solver": {
+            "type": "BARZILAIBORWEIN",
+            "max_iterations": 60,
+        },
+        "contact_materials": {
+            "flat_ground": {
+                "friction": "sampled from friction_range",
+                "restitution": 0.1,
+                "Kn": 2e5,
+                "Gn": 60.0,
+            },
+            "feet": {
+                "friction": 0.9,
+                "restitution": 0.01,
+                "Gn": 60.0,
+            },
+        },
+    }
 
 
 def _set_visual_color(body, color: chrono.ChColor) -> None:
@@ -113,6 +149,22 @@ def _contact_material(mu: float, restitution: float = 0.0):
     material = chrono.ChContactMaterialData()
     material.mu = mu
     material.cr = restitution
+    return material
+
+
+def _magic_contact_material(
+    friction: float,
+    restitution: float,
+    gn: float,
+    kn: float | None = None,
+):
+    """Create MaGIC-style SMC material for rigid foot/ground contact."""
+    material = chrono.ChContactMaterialSMC()
+    material.SetFriction(friction)
+    material.SetRestitution(restitution)
+    material.SetGn(gn)
+    if kn is not None:
+        material.SetKn(kn)
     return material
 
 
@@ -181,6 +233,8 @@ class Go1Env(gym.Env):
         system = chrono.ChSystemSMC()
         system.SetGravityY()
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
+        system.SetSolverType(chrono.ChSolver.Type_BARZILAIBORWEIN)
+        system.GetSolver().AsIterative().SetMaxIterations(60)
 
         if self.terrain_type == "scm":
             terrain = self._create_scm_terrain(system)
@@ -239,10 +293,13 @@ class Go1Env(gym.Env):
         # Sampled flat-ground friction is the first domain-randomization knob.
         # Foot friction stays at the Go1 reference value; only the floor material
         # changes from episode to episode.
-        ground_mat = chrono.ChContactMaterialSMC()
-        ground_mat.SetFriction(self.ground_friction)
+        ground_mat = _magic_contact_material(
+            friction=self.ground_friction,
+            restitution=0.1,
+            gn=60.0,
+            kn=2e5,
+        )
         ground_mat.SetRollingFriction(0.0001)
-        ground_mat.SetRestitution(0.0)
 
         ground = chrono.ChBodyEasyBox(10, 0.2, 10, 1000, True, True, ground_mat)
         ground.SetFixed(True)
@@ -286,10 +343,21 @@ class Go1Env(gym.Env):
             if body is not None:
                 body.EnableCollision(True)
 
+        foot_mat = _magic_contact_material(
+            friction=0.9,
+            restitution=0.01,
+            gn=60.0,
+        )
+        for name in ("FR_foot", "FL_foot", "RR_foot", "RL_foot"):
+            body = parser.GetChBody(name)
+            if body is not None:
+                body.GetCollisionModel().SetAllShapesMaterial(foot_mat)
+
     def _cache_robot_handles(self, system, terrain, parser) -> None:
         self._system = system
         self._terrain = terrain
         self._trunk = parser.GetChBody("trunk")
+        self._feet = [parser.GetChBody(name) for name in _FOOT_BODY_NAMES]
         self._motors = (
             [parser.GetChMotor(name) for name in _JOINT_NAMES]
             if self.enable_motors else []
@@ -401,67 +469,82 @@ class Go1Env(gym.Env):
             "trunk_z_up": float(np.clip(rot.Rotate(chrono.ChVector3d(0, 0, 1)).y, -1.0, 1.0)),
         }
 
-    def _standing_reward(
-        self,
-        obs: np.ndarray,
-        action: np.ndarray,
-        action_delta: np.ndarray,
-    ) -> tuple[float, dict]:
-        """Standing reward: survive while keeping the trunk upright."""
-        if not np.all(np.isfinite(obs)):
-            return -10.0, {"invalid_obs": 1.0}
-
-        trunk_y = float(obs[1])
-        trunk_lin_vel = obs[7:10]
-        trunk_ang_vel = obs[10:13]
+    def _trunk_reward_terms(self, obs: np.ndarray) -> tuple[float, dict]:
         axis_alignments = self._trunk_axis_alignments()
         upright_score = max(0.0, axis_alignments["trunk_z_up"])
         upright_reward = _UPRIGHT_REWARD_WEIGHT * upright_score
-        # Tilt penalty discourages the trunk from leaning while staying roughly upright.
         tilt_error = (
             axis_alignments["trunk_x_up"] ** 2
             + axis_alignments["trunk_y_up"] ** 2
         )
         tilt_penalty = _TILT_PENALTY_WEIGHT * float(tilt_error)
-        # Pose penalty keeps joint positions near the home setting.
-        joint_pos = obs[13:25]
-        joint_vel = obs[25:37]
-        pose_error = joint_pos - self.home_joint_angles
-        pose_penalty = _POSE_PENALTY_WEIGHT * float(np.mean(pose_error ** 2))
-        # Joint velocity penalty discourages rapid leg oscillation around home.
-        joint_vel_penalty = _JOINT_VEL_PENALTY_WEIGHT * float(np.mean(joint_vel ** 2))
-        # Action-rate penalty discourages twitchy target changes.
-        action_rate_penalty = _ACTION_RATE_PENALTY_WEIGHT * float(np.mean(action_delta ** 2))
-        # Control penalty discourages large sustained commands.
-        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.mean(action ** 2))
-        # Angular velocity penalty discourages trunk roll, pitch, and yaw.
-        ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.mean(trunk_ang_vel ** 2))
-        # X/Z velocity penalty discourages shuffling on the Y-up ground plane.
-        xz_vel = trunk_lin_vel[[0, 2]]
-        xz_vel_penalty = _XZ_VEL_PENALTY_WEIGHT * float(np.mean(xz_vel ** 2))
-        alive_bonus = _ALIVE_BONUS
-
-        reward = float(
-            alive_bonus
-            + upright_reward
-            - pose_penalty
-            - control_penalty
-            - joint_vel_penalty
-            - action_rate_penalty
-            - tilt_penalty
-            - ang_vel_penalty
-            - xz_vel_penalty
-        )
-
         terms = {
-            "alive_bonus": alive_bonus,
+            "alive_bonus": _ALIVE_BONUS,
             "upright_score": float(upright_score),
             "upright_reward": float(upright_reward),
-            "trunk_y": trunk_y,
+            "trunk_y": float(obs[1]),
             "tilt_error": float(tilt_error),
             "tilt_penalty": float(tilt_penalty),
+        }
+        terms.update(axis_alignments)
+        penalty = tilt_penalty
+        reward = _ALIVE_BONUS + upright_reward - penalty
+        return float(reward), terms
+
+    def _pose_reward_terms(self, obs: np.ndarray) -> tuple[float, dict]:
+        joint_pos = obs[13:25]
+        pose_error = joint_pos - self.home_joint_angles
+        pose_mse = float(np.mean(pose_error ** 2))
+        pose_penalty = _POSE_PENALTY_WEIGHT * pose_mse
+
+        fr = joint_pos[0:3]
+        fl = joint_pos[3:6]
+        rr = joint_pos[6:9]
+        rl = joint_pos[9:12]
+        leg_symmetry_error = 0.5 * (
+            float(np.mean((fr - fl) ** 2))
+            + float(np.mean((rr - rl) ** 2))
+        )
+        terms = {
             "pose_penalty": float(pose_penalty),
-            "pose_error": float(np.mean(pose_error ** 2)),
+            "pose_error": pose_mse,
+            "leg_symmetry_error": float(leg_symmetry_error),
+        }
+        return -float(pose_penalty), terms
+
+    def _foot_contact_terms(self) -> tuple[float, dict]:
+        foot_loads = np.array(
+            [abs(float(foot.GetContactForce().y)) for foot in self._feet],
+            dtype=np.float32,
+        )
+        missing_contact = np.maximum(0.0, _MIN_FOOT_LOAD - foot_loads) / _MIN_FOOT_LOAD
+        foot_contact_error = float(np.mean(missing_contact ** 2))
+        foot_contact_penalty = _FOOT_CONTACT_PENALTY_WEIGHT * foot_contact_error
+        terms = {
+            "foot_contact_error": float(foot_contact_error),
+            "foot_contact_penalty": float(foot_contact_penalty),
+            "min_foot_load": float(np.min(foot_loads)),
+            "mean_foot_load": float(np.mean(foot_loads)),
+        }
+        return -float(foot_contact_penalty), terms
+
+    def _motion_reward_terms(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        action_delta: np.ndarray,
+    ) -> tuple[float, dict]:
+        trunk_lin_vel = obs[7:10]
+        trunk_ang_vel = obs[10:13]
+        joint_vel = obs[25:37]
+        joint_vel_penalty = _JOINT_VEL_PENALTY_WEIGHT * float(np.mean(joint_vel ** 2))
+        action_rate_penalty = _ACTION_RATE_PENALTY_WEIGHT * float(np.mean(action_delta ** 2))
+        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.mean(action ** 2))
+        ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.mean(trunk_ang_vel ** 2))
+        xz_vel = trunk_lin_vel[[0, 2]]
+        xz_vel_penalty = _XZ_VEL_PENALTY_WEIGHT * float(np.mean(xz_vel ** 2))
+
+        terms = {
             "mean_abs_joint_vel": float(np.mean(np.abs(joint_vel))),
             "max_abs_joint_vel": float(np.max(np.abs(joint_vel))),
             "joint_vel_penalty": float(joint_vel_penalty),
@@ -483,8 +566,36 @@ class Go1Env(gym.Env):
             "lin_vel_x": float(trunk_lin_vel[0]),
             "lin_vel_z": float(trunk_lin_vel[2]),
         }
-        terms.update(axis_alignments)
-        return reward, terms
+        penalty = (
+            joint_vel_penalty
+            + action_rate_penalty
+            + control_penalty
+            + ang_vel_penalty
+            + xz_vel_penalty
+        )
+        return -float(penalty), terms
+
+    def _standing_reward(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        action_delta: np.ndarray,
+    ) -> tuple[float, dict]:
+        """Standing reward: survive, stay upright, and keep four-foot support."""
+        if not np.all(np.isfinite(obs)):
+            return -10.0, {"invalid_obs": 1.0}
+
+        reward = 0.0
+        terms = {}
+        for delta, delta_terms in (
+            self._trunk_reward_terms(obs),
+            self._pose_reward_terms(obs),
+            self._foot_contact_terms(),
+            self._motion_reward_terms(obs, action, action_delta),
+        ):
+            reward += delta
+            terms.update(delta_terms)
+        return float(reward), terms
 
     def _termination_reason(self, obs: np.ndarray, reward_terms: dict) -> str | None:
         if not np.all(np.isfinite(obs)):

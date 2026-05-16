@@ -68,18 +68,6 @@ evaluate_stand.py
 
 Runs deterministic evaluation episodes and reports survival/reward statistics.
 
-```text
-test_load_go1.py
-```
-
-Early model-loading and inspection script.
-
-```text
-calculate_fall_height.py
-```
-
-Calculates the fall-height threshold from the official Go1 home keyframe.
-
 ## What Was Built
 
 The Go1 model exposes:

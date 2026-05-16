@@ -5,6 +5,17 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 
+from diagnostics import (
+    FOOT_BODY_NAMES,
+    contact_body_groups,
+    contact_debug_stats,
+    foot_bodies,
+    foot_debug_stats,
+    foot_xz_positions,
+    format_foot_values,
+    new_interval_stats,
+    update_interval_stats,
+)
 from go1_env import Go1Env, _HOME_JOINT_ANGLES, _JOINT_NAMES
 
 
@@ -56,35 +67,63 @@ def _term(reward_terms: dict, name: str) -> float:
     return float(reward_terms.get(name, 0.0))
 
 
-def print_policy_step(episode: int, step: int, action, info: dict) -> None:
+def print_policy_step(
+    episode: int,
+    step: int,
+    action,
+    obs,
+    info: dict,
+    foot_stats: dict | None = None,
+    contact_stats: dict | None = None,
+    interval_stats: dict | None = None,
+) -> None:
     terms = info.get("reward_terms", {})
+    foot_text = ""
+    if foot_stats is not None:
+        foot_text = (
+            f" foot_dxz_mean={foot_stats['foot_dxz_mean']:.4f}"
+            f" foot_dxz_max={foot_stats['foot_dxz_max']:.4f}"
+            f" foot_vxz_mean={foot_stats['foot_vxz_mean']:.4f}"
+            f" foot_vxz_max={foot_stats['foot_vxz_max']:.4f}"
+            f" load_imb={foot_stats['foot_load_imbalance']:.3f}"
+            f" {format_foot_values('foot_y', foot_stats['foot_heights'])}"
+            f" {format_foot_values('foot_share', foot_stats['foot_load_shares'], 2)}"
+            f" {format_foot_values('foot_dxz', foot_stats['foot_displacements'])}"
+        )
+    contact_text = ""
+    if contact_stats is not None:
+        group_loads = contact_stats["group_loads"]
+        contact_text = (
+            f" {format_foot_values('foot_load', group_loads['foot'], 1)}"
+            f" {format_foot_values('calf_load', group_loads['calf'], 1)}"
+            f" {format_foot_values('thigh_load', group_loads['thigh'], 1)}"
+            f" {format_foot_values('hip_load', group_loads['hip'], 1)}"
+            f" {format_foot_values('leg_nonfoot_load', contact_stats['nonfoot_loads'], 1)}"
+        )
+    interval_text = ""
+    if interval_stats is not None:
+        interval_text = (
+            f" {format_foot_values('foot_y_min', interval_stats['foot_y_min'])}"
+            f" {format_foot_values('foot_y_max', interval_stats['foot_y_max'])}"
+            f" {format_foot_values('foot_load_min', interval_stats['foot_load_min'], 1)}"
+            f" {format_foot_values('foot_load_max', interval_stats['foot_load_max'], 1)}"
+            f" {format_foot_values('nonfoot_load_max', interval_stats['nonfoot_load_max'], 1)}"
+        )
     print(
         f"ep={episode:03d} step={step:04d} "
         f"height={_term(terms, 'trunk_y'):.3f} "
         f"upright={_term(terms, 'upright_score'):.3f} "
-        f"axis=({_term(terms, 'trunk_x_up'):+.3f},"
-        f"{_term(terms, 'trunk_y_up'):+.3f},"
-        f"{_term(terms, 'trunk_z_up'):+.3f}) "
-        f"ang_xyz=({_term(terms, 'ang_vel_x'):+.3f},"
-        f"{_term(terms, 'ang_vel_y'):+.3f},"
-        f"{_term(terms, 'ang_vel_z'):+.3f}) "
         f"xz_vel=({_term(terms, 'lin_vel_x'):+.3f},"
         f"{_term(terms, 'lin_vel_z'):+.3f}) "
         f"act_mean={_term(terms, 'mean_abs_action'):.3f} "
-        f"act_max={float(abs(action).max()):.3f} "
         f"dact_mean={_term(terms, 'mean_abs_action_delta'):.3f} "
-        f"dact_max={_term(terms, 'max_abs_action_delta'):.3f} "
+        f"jvel_mean={_term(terms, 'mean_abs_joint_vel'):.3f} "
+        f"sym={_term(terms, 'leg_symmetry_error'):.4f} "
         f"tilt={_term(terms, 'tilt_error'):.4f} "
         f"pose_err={_term(terms, 'pose_error'):.4f} "
-        f"jvel_mean={_term(terms, 'mean_abs_joint_vel'):.3f} "
-        f"jvel_max={_term(terms, 'max_abs_joint_vel'):.3f} "
-        f"pen=(ctrl:{_term(terms, 'control_penalty'):.4f},"
-        f"tilt:{_term(terms, 'tilt_penalty'):.4f},"
-        f"pose:{_term(terms, 'pose_penalty'):.4f},"
-        f"jvel:{_term(terms, 'joint_vel_penalty'):.4f},"
-        f"rate:{_term(terms, 'action_rate_penalty'):.4f},"
-        f"ang:{_term(terms, 'ang_vel_penalty'):.4f},"
-        f"xz:{_term(terms, 'xz_vel_penalty'):.4f})"
+        f"{foot_text}"
+        f"{contact_text}"
+        f"{interval_text}"
     )
 
 
@@ -105,12 +144,17 @@ def main() -> None:
     )
     model = PPO.load(args.policy)
     obs, _ = env.reset()
+    tracked_feet = foot_bodies(env)
+    tracked_contacts = contact_body_groups(env)
+    reset_foot_xz = foot_xz_positions(tracked_feet)
+    interval_stats = new_interval_stats()
     if args.joint_debug:
         print_joint_debug(obs)
     print(
         f"viewing policy={args.policy} terrain={args.terrain} "
         f"friction=({args.friction_min:.2f}, {args.friction_max:.2f})"
     )
+    print(f"tracking feet={', '.join(FOOT_BODY_NAMES)}")
     step = 0
     episode = 1
 
@@ -118,8 +162,21 @@ def main() -> None:
         while env.render():
             action, _ = model.predict(obs, deterministic=True)
             obs, _, terminated, truncated, info = env.step(action)
+            foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz)
+            contact_stats = contact_debug_stats(tracked_contacts)
+            update_interval_stats(interval_stats, foot_stats, contact_stats)
             if args.log_interval > 0 and step % args.log_interval == 0:
-                print_policy_step(episode, step, action, info)
+                print_policy_step(
+                    episode,
+                    step,
+                    action,
+                    obs,
+                    info,
+                    foot_stats,
+                    contact_stats,
+                    interval_stats,
+                )
+                interval_stats = new_interval_stats()
             step += 1
             if terminated or truncated:
                 print(
@@ -128,6 +185,10 @@ def main() -> None:
                     f"steps={step}"
                 )
                 obs, _ = env.reset()
+                tracked_feet = foot_bodies(env)
+                tracked_contacts = contact_body_groups(env)
+                reset_foot_xz = foot_xz_positions(tracked_feet)
+                interval_stats = new_interval_stats()
                 if args.joint_debug:
                     print_joint_debug(obs)
                 step = 0

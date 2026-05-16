@@ -7,50 +7,53 @@ quadruped.
 
 1. Build a stable Go1 simulation in Chrono.
 2. Wrap it as a Gymnasium environment.
-3. Train standing then locomotion policies.
+3. Train standing, then locomotion policies.
 4. Transfer to Chrono SCM deformable terrain.
-5. Collect rollouts, train a world model, add hierarchical skill selection.
+5. Collect rollouts, train a world model, and add hierarchical skill selection.
 
 ## Current Status
 
 ```text
 Stage 1 - standing policy, flat terrain, fixed friction=0.8
 
-Active reward:
-  alive + upright
-  - pose
-  - control
-  - joint_velocity
-  - action_rate
-  - tilt
-  - angular_velocity
-  - xz_velocity
+Status:
+  accepted flat-ground standing baseline
+
+Current baseline:
+  home pose:     [hip=0.0, thigh=0.7, calf=-1.4] per leg
+  spawn height:  0.34 m
+  action scale:  0.20 rad normalized offset
+  collision:     trunk + feet only
+  contact:       MaGIC-style Chrono rigid contact settings
+  reward:        upright survival + smoothness + four-foot support
 
 Solved:
   - Chrono simulation + Y-up world
   - Chrono-specific Go1 URDF with trunk as the free root
-  - Hip joint axis bug; hips are visible to pose penalty
-  - Joint observations fixed; motor frames report true home pose
-  - Motor ramp removed; DoAssembly places the robot at home pose with no warm-up
-  - Stable Chrono home pose: hip=0.0, thigh=0.7, calf=-1.4
-  - Spawn height 0.34 m matches the less-crouched support height
-  - Flat-ground standing v1 completes 1000-step fixed-friction evaluations
+  - Joint angle observation sign/axis bug
+  - Zero-overhead home-pose spawn with DoAssembly
+  - Stable Chrono home pose and spawn height
+  - Non-foot leg collision support exploit
+  - Raised/unloaded front-left foot stance
+  - Visible vibration after the contact/support fix
 
-Pending:
-  - Patch remaining mild in-place shuffling
-  - Save this as the flat-ground standing v1 checkpoint
-  - Start Stage 2 with randomized flat-ground friction
+Next:
+  - checkpoint this standing baseline
+  - move to flat-ground friction randomization
+  - keep contact diagnostics available while robustness is added
 ```
 
-## Latest Decision: Flat-Ground Standing v1
+## Latest Decision: Flat-Ground Standing v2
 
-**Status:** Accepted as the first usable standing baseline.
+**Status:** Accepted.
 
-The current policy stands on flat Chrono terrain at fixed friction 0.8. It no
-longer sinks, tips, or develops the large one-sided lean that appeared during
-earlier reward tests. The remaining defect is mild in-place leg chatter.
+The policy now stands upright on flat Chrono terrain at fixed friction 0.8
+without the earlier one-leg-up stance or visible vibration. The key fix was not
+another pure smoothness reward. The policy and contact diagnostics showed that
+leg-link collisions and weak foot-contact incentives were letting the robot use
+bad support modes.
 
-The accepted reward stack is:
+The accepted standing reward is:
 
 ```python
 reward = (
@@ -63,6 +66,7 @@ reward = (
     - tilt_penalty
     - ang_vel_penalty
     - xz_vel_penalty
+    - foot_contact_penalty
 )
 ```
 
@@ -71,31 +75,59 @@ Current weights:
 ```text
 alive_bonus             1.00
 upright_reward          0.15 * upright_score
-pose_penalty            0.10 * mean(joint_error^2)
+pose_penalty            0.30 * mean(joint_error^2)
 control_penalty         0.03 * mean(action^2)
 joint_vel_penalty       0.01 * mean(joint_velocity^2)
-action_rate_penalty     0.01 * mean(action_delta^2)
+action_rate_penalty     0.03 * mean(action_delta^2)
 tilt_penalty            0.25 * (trunk_x_up^2 + trunk_y_up^2)
 angular_vel_penalty     0.01 * mean(trunk_angular_velocity^2)
 xz_vel_penalty          0.20 * mean([vx, vz]^2)
+foot_contact_penalty    0.10 * mean(missing_foot_load^2)
+minimum foot load       20 N per foot before penalty is zero
 ```
+
+`leg_symmetry_error` is still logged as a diagnostic, but it is not an active
+reward penalty in the accepted baseline.
 
 Latest accepted evaluation:
 
 ```text
 survival_rate:       1.000
 mean_length:         1000.0
-min_trunk_y:         0.336
-min_upright_score:   0.994
-mean_abs_xz_vel:     0.040
-mean_abs_joint_vel:  0.283
-mean_abs_action:     0.380
+min_trunk_y:         0.337
+min_upright_score:   1.000
+mean_abs_xz_vel:     0.007
+mean_abs_joint_vel:  0.393
+mean_abs_action:     0.304
+mean_foot_load:      32.09 N
+min_foot_load:       17.58 N
 termination:         truncated only
 ```
 
-**Tradeoff:** this is stable enough to checkpoint, but not polished. The policy
-still uses visible corrective leg motion. The next reward work should target
-smoothness one term at a time so we do not break the recovered upright baseline.
+The viewer showed all four feet close to the same height, no calf/thigh/hip
+contact load, low X/Z drift, and no obvious vibration.
+
+## Why The Final Fix Worked
+
+The important chain was:
+
+1. Zero action was already stable, so the basic home pose and spawn height were
+   not the current failure.
+2. Policy viewer foot diagnostics showed foot displacement and foot velocity,
+   meaning the shuffling was physically real, not only visual.
+3. Link-contact diagnostics showed huge calf/thigh contact loads when those
+   links were collidable. The policy could lean on non-foot collision geometry.
+4. Matching the MaGIC-style contact setup, we disabled hip/thigh/calf terrain
+   collisions and kept trunk + feet collidable.
+5. After that, the old policy revealed the real issue: it could stand while
+   leaving one foot unloaded.
+6. A weak four-foot support penalty fixed the stance because it asks for contact
+   load, not equal world foot height. That is better for future SCM terrain.
+
+Tradeoff: disabling leg-link terrain collision is less literal for falls and
+scrapes, but it is the better training model for standing and walking because
+the learned policy should support itself through the feet. Trunk collision stays
+enabled so falls still contact the terrain.
 
 ## Project Shape
 
@@ -104,7 +136,7 @@ go1_env.py                 Chrono Gymnasium environment
 view_env.py                zero-action/live test harness
 train_stand.py             PPO standing-policy training
 evaluate_stand.py          headless policy evaluation
-view_stand_policy.py       trained-policy viewer
+view_stand_policy.py       trained-policy viewer with contact diagnostics
 models/go1/go1_chrono.urdf Chrono-specific Go1 URDF
 chrono_go1_soil.py         SCM deformable terrain milestone
 mujoco/                    MuJoCo baseline (reference only)
@@ -112,6 +144,12 @@ docs/                      decision logs and roadmap
 ```
 
 ## Quick Start
+
+Create the documented environment:
+
+```powershell
+C:\Users\ankus\anaconda3\Scripts\conda.exe env create -f environment.yml
+```
 
 ```powershell
 # View environment with zero policy action
@@ -127,17 +165,24 @@ C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe evaluate_stand.py runs/stand
 C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/stand/final_model.zip
 ```
 
+## Document Map
+
+Read in this order if you are new to the project:
+
+- [docs/reproducibility.md](docs/reproducibility.md) - install steps,
+  commands, accepted metrics, and non-determinism notes
+- [docs/experiments/standing_v2.md](docs/experiments/standing_v2.md) - model
+  card for the accepted flat-ground standing baseline
+- [docs/training_roadmap.md](docs/training_roadmap.md) - reward history,
+  diagnostics, what worked, and what did not
+- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono import,
+  solver, contact, home pose, and reset decisions
+- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision and
+  contact debugging trail
+
 ## Technical Decisions
 
-Each section records what forced the decision, what was chosen, and what it
-costs. Full ADRs:
-[docs/chrono_port_notes.md](docs/chrono_port_notes.md) -
-[docs/training_roadmap.md](docs/training_roadmap.md) -
-[docs/collision_debug_log.md](docs/collision_debug_log.md)
-
-### ADR-001: Y-Up World + Position Control
-
-**Status:** Accepted
+### Y-Up World + Position Control
 
 Go1 source assets are ROS/Z-up, but this project uses Chrono with Y as the world
 up direction. The imported robot root is rotated -90 degrees about X. All joints
@@ -146,26 +191,13 @@ use position control. Zero action means "hold the home pose," not "motors off."
 Actions are normalized offsets:
 
 ```python
-target = home + 0.25 * action
+target = home + 0.20 * action
 ```
 
-### ADR-002: Chrono-Specific URDF
+### Stable Chrono Home Pose
 
-**Status:** Accepted
-
-The original Go1 URDF has a dummy fixed root that Chrono imports as an anchor.
-`models/go1/go1_chrono.urdf` removes that dummy root so the trunk is the free
-body. Mesh paths are local.
-
-### ADR-003: Stable Chrono Home Pose
-
-**Status:** Accepted
-
-The Menagerie home pose (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) slowly sank in
-this Chrono import even with zero policy action. Reward tuning was therefore
-fighting a bad neutral pose.
-
-Accepted baseline:
+The Menagerie crouch (`hip=0.0`, `thigh=0.9`, `calf=-1.8`) slowly sank in this
+Chrono import. The accepted Chrono baseline is:
 
 ```text
 home pose:    hip=0.0, thigh=0.7, calf=-1.4
@@ -174,64 +206,45 @@ spawn height: 0.34 m
 
 This pose starts at its natural support height and holds with zero action.
 
-### ADR-004: Zero-Overhead Home-Pose Spawn
+### MaGIC-Style Contact Setup
 
-**Status:** Accepted
+The current rigid-contact setup follows the relevant MaGIC 2025 Chrono lessons:
 
-`SetRootInitPose()` only initializes the root. Joints initially start at zero.
-Instead of using a 500-step motor ramp, the env fixes the trunk, runs Chrono's
-position assembly solver, then unfixes the trunk:
-
-```python
-self._trunk.SetFixed(True)
-system.DoAssembly(1)
-self._trunk.SetFixed(False)
+```text
+solver:             BARZILAIBORWEIN
+solver iterations:  60
+ground friction:    per-episode friction range, currently fixed at 0.8
+ground restitution: 0.1
+ground Kn/Gn:       2e5 / 60
+foot friction:      0.9
+foot restitution:   0.01
+foot Gn:            60
 ```
 
-This places all position motors at the home pose before the first dynamics step.
+This is not a full clone of the MaGIC Go2 tutorial. This project uses Go1, a
+different reward stack, and a standing-first training path.
 
-### ADR-005: Collision Whitelist
+### Collision Whitelist
 
-**Status:** Accepted
+Current training collision bodies:
 
-Enabling collision on every imported body caused solver explosions. The env
-enables only the external contact envelope: trunk, hips, thighs, calves, and
-feet. Rotor, camera, and marker bodies stay non-colliding.
+```python
+_ROBOT_COLLISION_BODIES = (
+    "trunk",
+    "FR_foot", "FL_foot", "RR_foot", "RL_foot",
+)
+```
 
-### ADR-006: Standing Reward
-
-**Status:** Flat-ground v1 accepted
-
-The standing reward was rebuilt from scratch after joint observation and home
-pose bugs invalidated early training runs. Terms were added one at a time and
-kept only after evaluation.
-
-Important rejected paths:
-
-- Raising upright reward alone reduced lean but brought back more leg chatter.
-- Raising angular-velocity too much made the policy too constrained and unstable.
-- Raising control penalty too much reduced corrective authority and caused worse
-  tipping/spinning.
-- Pose penalty was not the main fix once pose error stayed near zero.
-
-Accepted lesson: separate the failure modes. Use `xz_vel` for ground-plane drift,
-`joint_vel` and `action_rate` for chatter, `ang_vel` for body motion, and `tilt`
-for persistent lean.
-
-### ADR-007: Full Rebuild On Reset
-
-**Status:** Accepted
-
-SCM terrain deformation cannot be cleared in place, so `reset()` rebuilds the
-Chrono system. Flat and SCM terrain use the same reset path.
+Hips, thighs, calves, rotors, camera bodies, and sensor marker bodies do not
+collide with the terrain. This prevents the policy from using the side of a leg
+as a hidden support. The viewer still reports calf/thigh/hip contact loads so we
+can catch accidental regressions.
 
 ## Roadmap
 
 ```text
-Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- active
-           -> flat-ground standing v1 accepted
-           -> next: reduce mild in-place shuffling
-Stage 2  train_stand.py       flat terrain, friction randomized
+Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
+Stage 2  train_stand.py       flat terrain, randomized friction      <- next
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills
@@ -242,15 +255,20 @@ Stage 7  hierarchy            skill selection and planning
 Immediate next steps:
 
 ```text
-1. keep the current flat-ground standing model as v1
-2. tune one smoothness term at a time to reduce mild shuffling
-3. rerun fixed-friction evaluation after every reward edit
-4. start friction randomization once v1 smoothness is acceptable
-5. move to SCM only after flat randomized standing is stable
+1. keep the current flat-ground standing model as the v2 baseline
+2. run friction-randomized standing on flat rigid terrain
+3. keep checking foot load, foot slip, and non-foot contact diagnostics
+4. move to walking only after randomized standing survives cleanly
+5. move to SCM after rigid terrain robustness is believable
 ```
 
 ## Detailed Notes
 
-- [docs/training_roadmap.md](docs/training_roadmap.md) - reward decisions, diagnosis log, evaluation checklist
-- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono port engineering notes
-- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision whitelist debug log
+Future training runs write two metadata files next to the saved policy:
+
+```text
+args.json
+env_constants.json
+```
+
+Keep those with any checkpoint that gets reported or shared.
