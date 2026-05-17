@@ -6,7 +6,6 @@ from pathlib import Path
 from stable_baselines3 import PPO
 
 from diagnostics import (
-    FOOT_BODY_NAMES,
     contact_body_groups,
     contact_debug_stats,
     foot_bodies,
@@ -17,6 +16,11 @@ from diagnostics import (
     update_interval_stats,
 )
 from go1_env import Go1Env, _HOME_JOINT_ANGLES, _JOINT_NAMES
+from project_config import (
+    CURRENT_BASELINE_MODEL,
+    DEFAULT_VIEWER_FRICTION_RANGE,
+    SB3_DEVICE,
+)
 
 
 def parse_args():
@@ -25,12 +29,12 @@ def parse_args():
         "policy",
         type=Path,
         nargs="?",
-        default=Path("runs/stand/final_model.zip"),
+        default=CURRENT_BASELINE_MODEL,
         help="Path to a Stable-Baselines3 policy zip.",
     )
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
-    parser.add_argument("--friction-min", type=float, default=0.8)
-    parser.add_argument("--friction-max", type=float, default=0.8)
+    parser.add_argument("--friction-min", type=float, default=DEFAULT_VIEWER_FRICTION_RANGE[0])
+    parser.add_argument("--friction-max", type=float, default=DEFAULT_VIEWER_FRICTION_RANGE[1])
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument(
         "--log-interval",
@@ -42,6 +46,11 @@ def parse_args():
         "--joint-debug",
         action="store_true",
         help="Print reset joint angle errors for pose observation debugging.",
+    )
+    parser.add_argument(
+        "--full-diagnostics",
+        action="store_true",
+        help="Print the full per-foot contact/debug fields instead of the compact status line.",
     )
     return parser.parse_args()
 
@@ -67,7 +76,37 @@ def _term(reward_terms: dict, name: str) -> float:
     return float(reward_terms.get(name, 0.0))
 
 
-def print_policy_step(
+def _max(values) -> float:
+    return float(max(values)) if values else 0.0
+
+
+def print_compact_policy_step(
+    episode: int,
+    step: int,
+    info: dict,
+    foot_stats: dict,
+    interval_stats: dict,
+) -> None:
+    terms = info.get("reward_terms", {})
+    foot_load_min = min(interval_stats["foot_load_min"])
+    print(
+        f"ep={episode:03d} step={step:04d} "
+        f"h={_term(terms, 'trunk_y'):.3f} "
+        f"up={_term(terms, 'upright_score'):.3f} "
+        f"xz=({_term(terms, 'lin_vel_x'):+.3f},{_term(terms, 'lin_vel_z'):+.3f}) "
+        f"act={_term(terms, 'mean_abs_action'):.3f} "
+        f"dact={_term(terms, 'mean_abs_action_delta'):.3f} "
+        f"jvel={_term(terms, 'mean_abs_joint_vel'):.3f} "
+        f"tilt={_term(terms, 'tilt_error'):.4f} "
+        f"foot_min={foot_load_min:.1f}N "
+        f"load_imb={foot_stats['foot_load_imbalance']:.2f} "
+        f"slip={foot_stats['foot_dxz_max']:.4f}m "
+        f"vfoot={foot_stats['foot_vxz_max']:.4f}m/s "
+        f"nonfoot_max={_max(interval_stats['nonfoot_load_max']):.1f}N"
+    )
+
+
+def print_full_policy_step(
     episode: int,
     step: int,
     action,
@@ -142,7 +181,7 @@ def main() -> None:
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
     )
-    model = PPO.load(args.policy)
+    model = PPO.load(args.policy, device=SB3_DEVICE)
     obs, _ = env.reset()
     tracked_feet = foot_bodies(env)
     tracked_contacts = contact_body_groups(env)
@@ -154,7 +193,6 @@ def main() -> None:
         f"viewing policy={args.policy} terrain={args.terrain} "
         f"friction=({args.friction_min:.2f}, {args.friction_max:.2f})"
     )
-    print(f"tracking feet={', '.join(FOOT_BODY_NAMES)}")
     step = 0
     episode = 1
 
@@ -166,16 +204,25 @@ def main() -> None:
             contact_stats = contact_debug_stats(tracked_contacts)
             update_interval_stats(interval_stats, foot_stats, contact_stats)
             if args.log_interval > 0 and step % args.log_interval == 0:
-                print_policy_step(
-                    episode,
-                    step,
-                    action,
-                    obs,
-                    info,
-                    foot_stats,
-                    contact_stats,
-                    interval_stats,
-                )
+                if args.full_diagnostics:
+                    print_full_policy_step(
+                        episode,
+                        step,
+                        action,
+                        obs,
+                        info,
+                        foot_stats,
+                        contact_stats,
+                        interval_stats,
+                    )
+                else:
+                    print_compact_policy_step(
+                        episode,
+                        step,
+                        info,
+                        foot_stats,
+                        interval_stats,
+                    )
                 interval_stats = new_interval_stats()
             step += 1
             if terminated or truncated:

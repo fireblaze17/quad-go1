@@ -7,6 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 from go1_env import Go1Env
+from project_config import ORIGINAL_STAND_MODEL, SB3_DEVICE
 
 
 def parse_args():
@@ -15,7 +16,7 @@ def parse_args():
         "policy",
         type=Path,
         nargs="?",
-        default=Path("runs/stand/final_model.zip"),
+        default=ORIGINAL_STAND_MODEL,
         help="Path to a Stable-Baselines3 policy zip.",
     )
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
@@ -40,7 +41,7 @@ def main() -> None:
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
     )
-    model = PPO.load(args.policy)
+    model = PPO.load(args.policy, device=SB3_DEVICE)
 
     episode_rewards = []
     episode_lengths = []

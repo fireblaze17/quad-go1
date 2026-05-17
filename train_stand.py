@@ -9,6 +9,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 
 from go1_env import Go1Env, standing_env_metadata
+from project_config import DEFAULT_CHECKPOINT_FREQ, SB3_DEVICE
 
 
 def parse_args():
@@ -21,6 +22,12 @@ def parse_args():
     parser.add_argument("--save-dir", type=Path, default=Path("runs/stand"))
     parser.add_argument("--load", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=DEFAULT_CHECKPOINT_FREQ,
+        help="Save PPO checkpoints every N environment steps. Set <=0 to disable.",
+    )
     return parser.parse_args()
 
 
@@ -59,11 +66,12 @@ def main() -> None:
 
     env = make_env(args)
     if args.load is not None:
-        model = PPO.load(args.load, env=env)
+        model = PPO.load(args.load, env=env, device=SB3_DEVICE)
     else:
         model = PPO(
             "MlpPolicy",
             env,
+            device=SB3_DEVICE,
             verbose=1,
             seed=args.seed,
             n_steps=1024,
@@ -72,12 +80,14 @@ def main() -> None:
             gamma=0.99,
         )
 
-    checkpoint = CheckpointCallback(
-        save_freq=25_000,
-        save_path=str(args.save_dir / "checkpoints"),
-        name_prefix="stand_policy",
-    )
-    model.learn(total_timesteps=args.timesteps, callback=checkpoint)
+    callback = None
+    if args.checkpoint_freq > 0:
+        callback = CheckpointCallback(
+            save_freq=args.checkpoint_freq,
+            save_path=str(args.save_dir / "checkpoints"),
+            name_prefix="stand_policy",
+        )
+    model.learn(total_timesteps=args.timesteps, callback=callback)
     model.save(args.save_dir / "final_model")
     env.close()
 

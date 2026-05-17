@@ -6,7 +6,7 @@ flat-ground standing baseline without reading the full decision history.
 ## Platform Assumptions
 
 ```text
-OS tested:        Windows
+OS tested:        WSL Ubuntu on Windows
 Python:           3.12
 PyChrono:         10.0.0
 Gymnasium:        1.2.3
@@ -16,52 +16,151 @@ World frame:      Chrono Y-up
 Robot model:      models/go1/go1_chrono.urdf
 ```
 
-The current setup uses Irrlicht for visualization. If Irrlicht cannot use the
-default video driver, the viewer may print a fallback message and continue with
-OpenGL.
+The active development path is WSL Ubuntu with the `chrono-go1` conda
+environment. Activate it before running project commands:
+
+```bash
+conda activate chrono-go1
+```
+
+After activation, use `python`. On Ankus's WSL machine, the equivalent explicit
+interpreter is `/home/ankus/miniforge3/envs/chrono-go1/bin/python`.
+
+The current setup uses Irrlicht through WSLg for visualization. If GUI windows
+or the viewer start behaving strangely, close open GUI windows first. If that
+does not clear it, run this from Windows PowerShell and then reopen the WSL
+terminal:
+
+```powershell
+wsl --shutdown
+```
+
+If Irrlicht cannot use the default video driver, the viewer may print a fallback
+message and continue with OpenGL.
+
+## Why WSL Is The Primary Platform
+
+Native Windows PyChrono was abandoned for this project after Windows Smart App
+Control blocked unsigned Chrono extension binaries during import. The observed
+failure mode included blocked files such as:
+
+```text
+Chrono_vehicle.dll
+_parsers.pyd
+```
+
+When this happens, PyChrono modules may fail to import even though the conda
+environment appears to be installed correctly. Because these are binary
+extension loads, reinstalling Python packages is usually not the useful first
+move.
+
+Recommended response:
+
+1. Switch to WSL Ubuntu for this repo.
+2. Create or use the WSL `chrono-go1` conda environment.
+3. Activate `chrono-go1` and run commands with `python`.
+4. Treat the old native Windows repo as backup only.
+
+Alternative Windows-only recovery is to open Windows Security, check Protection
+History, and allow the blocked Chrono binaries or change the local application
+control policy. That path is not the project baseline because it is machine
+policy dependent and easy to break again.
 
 ## Environment Setup
 
 Create the conda environment from the root file:
 
-```powershell
-C:\Users\ankus\anaconda3\Scripts\conda.exe env create -f environment.yml
+```bash
+conda env create -f environment.yml
 ```
 
 Activate it if conda is initialized in your shell:
 
-```powershell
+```bash
 conda activate chrono-go1
 ```
 
-The commands below use the environment's `python.exe` directly, so they also
-work when shell activation is unavailable.
+The commands below assume `conda activate chrono-go1` has already run.
+
+Quick syntax check:
+
+```bash
+python -m py_compile go1_env.py train_stand.py evaluate_stand.py view_env.py view_stand_policy.py diagnostics.py friction_curriculum.py project_config.py
+```
+
+## Stable-Baselines3 Device Choice
+
+`train_stand.py`, `evaluate_stand.py`, and `view_stand_policy.py` force
+Stable-Baselines3 to load/run PPO on CPU:
+
+```python
+device="cpu"
+```
+
+Reason: this project uses an MLP PPO policy with CPU-bound Chrono rollouts. SB3
+can auto-select CUDA when it is available, but it warns that PPO without a CNN
+policy is usually intended for CPU. In this project that warning matched lower
+training FPS, so CPU is the reproducible default.
+
+Tradeoff: GPU acceleration is left unused for this policy, but training avoids
+small CPU/GPU transfer overheads and the warning noise. Revisit only if the
+policy architecture changes substantially, for example to image observations or
+a CNN.
+
+`project_config.py` stores shared project paths and runtime defaults, including
+the accepted friction A baseline, the fixed-friction baseline, the default
+viewer friction range, and the SB3 device.
 
 ## Baseline Commands
 
 Zero-action environment check:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_env.py
+```bash
+python view_env.py
 ```
 
 Train the accepted standing task:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
+```bash
+python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
 ```
+
+`train_stand.py` saves checkpoints every `25_000` steps by default. Override
+with `--checkpoint-freq`; use `--checkpoint-freq 0` to disable intermediate
+checkpoints while still saving `final_model.zip`.
 
 Evaluate:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
+```bash
+python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
 ```
 
 View:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
+```bash
+python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
 ```
+
+## Current Viewer Default
+
+`view_stand_policy.py` now defaults to the accepted friction A checkpoint and
+range, so pressing Run in VS Code opens:
+
+```text
+policy:   runs/stand_friction_a_07_09/final_model.zip
+terrain:  flat
+friction: 0.7-0.9
+```
+
+The default console output is compact and focused on the current acceptance
+signals:
+
+```text
+h up xz act dact jvel tilt foot_min load_imb slip vfoot nonfoot_max
+```
+
+Use `--full-diagnostics` when debugging per-foot heights, foot load ranges, or
+calf/thigh/hip contact loads in detail.
 
 ## Expected Standing V2 Metrics
 

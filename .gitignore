@@ -5,6 +5,7 @@ __pycache__/
 .matplotlib/
 
 .venv/
+.conda/
 venv/
 env/
 

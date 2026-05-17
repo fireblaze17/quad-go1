@@ -8,6 +8,46 @@ state.
 
 ---
 
+## ADR-000: WSL Runtime For PyChrono
+
+**Status:** Accepted
+
+**Context:** The project originally ran PyChrono from a native Windows conda
+environment. That path became unreliable when Windows Smart App Control blocked
+unsigned Chrono binary extensions during import. The observed blocked files
+included `Chrono_vehicle.dll` and `pychrono/_parsers.pyd`.
+
+**Decision:** Use WSL Ubuntu as the active runtime for this repo. Activate the
+WSL conda environment before running project commands:
+
+```bash
+conda activate chrono-go1
+```
+
+After activation, use `python`. On Ankus's WSL machine, the equivalent explicit
+interpreter is `/home/ankus/miniforge3/envs/chrono-go1/bin/python`.
+
+WSLg is the visualization path for Irrlicht viewers. If viewer windows or GUI
+state become inconsistent, close the GUI windows and reset WSL from Windows
+PowerShell with:
+
+```powershell
+wsl --shutdown
+```
+
+**Consequences:**
+
+- Reproduction no longer depends on local Windows application-control policy.
+- Native Windows repo copies should be treated as old backups unless explicitly
+  synchronized.
+- If another user sees blocked Chrono DLL or `_parsers.pyd` import errors, the
+  recommended project path is to move to WSL rather than keep reinstalling
+  packages inside native Windows.
+- Viewer behavior depends on WSLg, so GUI issues may need a WSL restart even
+  when headless evaluation is fine.
+
+---
+
 ## ADR-001: Y-Up World
 
 **Status:** Accepted

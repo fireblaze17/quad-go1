@@ -559,14 +559,20 @@ termination_reasons = {'truncated': episodes}
 Viewer diagnostics to watch:
 
 ```text
-foot_y                                  visual stance height per foot
-foot_load / foot_share                  whether every foot participates
-foot_dxz / foot_vxz                     slip and skitter
-calf/thigh/hip load                     hidden non-foot support
-dact_mean                               target twitchiness
-jvel_mean                               physical leg chatter
+h / up                                  trunk height and upright score
+xz                                      horizontal drift velocity
+act / dact                              command size and target twitchiness
+jvel                                    physical leg chatter
 tilt                                    trunk lean
+foot_min / load_imb                     foot participation and load balance
+slip / vfoot                            foot displacement and skitter
+nonfoot_max                             hidden calf/thigh/hip support
 ```
+
+`view_stand_policy.py` keeps the detailed per-foot fields behind
+`--full-diagnostics`. The default line was shortened after friction A because
+the full diagnostic wall made it harder to see the acceptance signals while the
+viewer was running.
 
 ---
 
@@ -574,20 +580,20 @@ tilt                                    trunk lean
 
 Train:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000
+```bash
+python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000
 ```
 
 Evaluate:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe evaluate_stand.py runs/stand/final_model.zip
+```bash
+python evaluate_stand.py runs/stand/final_model.zip
 ```
 
 View:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/stand/final_model.zip
+```bash
+python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
 ```
 
 ---
@@ -596,7 +602,8 @@ C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/st
 
 ```text
 Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
-Stage 2  train_stand.py       flat terrain, randomized friction      <- next
+Stage 2  train_stand.py       flat terrain, randomized friction A    <- accepted
+Stage 2b train_stand.py       flat terrain, randomized friction B/C  <- next
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills
@@ -606,6 +613,44 @@ Stage 7  hierarchy            skill selection and planning
 
 Stage 2 fine-tune command:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe train_stand.py --terrain flat --friction-min 0.6 --friction-max 1.0 --load runs/stand/final_model.zip --save-dir runs/stand_friction_narrow
+```bash
+python friction_curriculum.py train friction_b --run
 ```
+
+## Stage 2: Randomized Friction Curriculum
+
+Current status:
+
+```text
+base fixed 0.8              accepted
+friction_a 0.7-0.9          accepted, 300k continuation
+friction_b 0.6-1.0          next
+friction_c 0.5-1.1          pending
+```
+
+What changed:
+
+- Added staged friction randomization after the fixed-friction standing v2
+  baseline.
+- Kept reward, contact, collision, home pose, action scale, and solver settings
+  unchanged so friction robustness is isolated from physics/reward changes.
+- Forced SB3 PPO to CPU because this MLP policy and Chrono rollout loop do not
+  benefit from CUDA in the current setup.
+- Centralized accepted baseline paths, friction run directories, viewer
+  defaults, and the SB3 device in `project_config.py` to reduce drift between
+  scripts and docs.
+
+Why 300k was accepted for friction A:
+
+- A 150k continuation survived but visually shuffled in place and leaned.
+- The 300k continuation was visibly cleaner and matched the contact metrics:
+  much lower foot-contact error, higher minimum foot load, lower action-rate
+  motion, lower angular velocity, and lower X/Z motion.
+
+Training-length lesson:
+
+- Fine-tuning can use more steps than the original run. It means continuing
+  from useful weights, not automatically using a tiny number of updates.
+- More PPO steps are not accepted blindly. Each stage must still pass randomized
+  eval, fixed-0.8 regression, viewer stability, foot contact, and zero non-foot
+  support.

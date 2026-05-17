@@ -9,8 +9,8 @@ the viewer.
 
 ## Training Command
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
+```bash
+python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
 ```
 
 PPO settings in `train_stand.py`:
@@ -62,8 +62,8 @@ reward penalty in this accepted baseline.
 
 ## Evaluation Command
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
+```bash
+python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
 ```
 
 Accepted evaluation:
@@ -91,8 +91,8 @@ friction_max_seen: 0.800
 
 Use:
 
-```powershell
-C:\Users\ankus\anaconda3\envs\chrono-go1\python.exe view_stand_policy.py runs/stand/final_model.zip
+```bash
+python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
 ```
 
 Expected signature after the first settling period:
