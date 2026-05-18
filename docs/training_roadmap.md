@@ -306,7 +306,7 @@ after the contact fixes because it keeps the trunk centered.
 
 ## ADR-010: Diagnostic Term - `leg_symmetry_error`
 
-**Status:** Disabled after testing
+**Status:** Diagnostic only
 
 **Context:** The policy appeared to tuck and load one side differently. A weak
 leg symmetry penalty was tested because it is more terrain-safe than absolute
@@ -327,13 +327,18 @@ tested_penalty = weight * leg_symmetry_error
 - `0.20`, `0.25`, and `0.30` did not force clean contact and increased wobble.
 - After disabling non-foot collisions and adding foot support, the symmetry
   error naturally dropped near `0.0017`.
+- During friction B widening, the policy again found a persistent asymmetric
+  load pattern while keeping non-foot contact at zero.
+- A later `0.02` friction B experiment survived but did not remove the visible
+  lean and made the contact signature worse than the clean AB reference.
 
-**Decision:** remove the zero-weight penalty from the reward path and keep
-`leg_symmetry_error` in reward logs as a diagnostic only.
+**Decision:** keep `leg_symmetry_error` in logs and viewer diagnostics, but do
+not include it in the reward while diagnosing friction B tilt.
 
-**Tradeoff:** disabling it allows small corrective asymmetries. If walking later
-develops pathological asymmetry, revisit this as a weak regularizer, not as a
-standing fix.
+**Tradeoff:** symmetry can fight valid corrective asymmetries if it is too
+strong. The current tilt investigation should first identify whether the cause
+is contact load, slip, policy action bias, or curriculum range before changing
+reward terms again.
 
 ---
 
@@ -574,6 +579,17 @@ nonfoot_max                             hidden calf/thigh/hip support
 the full diagnostic wall made it harder to see the acceptance signals while the
 viewer was running.
 
+Headless tilt diagnosis:
+
+```bash
+python diagnose_policy.py POLICY.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/RUN_NAME
+```
+
+Use this before changing reward or physics when a policy survives but leans.
+It reports whether foot unload, load imbalance, foot slip, action bias, or joint
+asymmetry appears before tilt. Generated `diagnostics/` outputs are local and
+gitignored.
+
 ---
 
 ## Commands
@@ -603,7 +619,8 @@ python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction
 ```text
 Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
 Stage 2  train_stand.py       flat terrain, randomized friction A    <- accepted
-Stage 2b train_stand.py       flat terrain, randomized friction B/C  <- next
+Stage 2b train_stand.py       flat terrain, randomized friction B    <- accepted via AB generalization
+Stage 2c train_stand.py       flat terrain, randomized friction C    <- next
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills
@@ -611,10 +628,10 @@ Stage 6  world model          obs/action/next_obs prediction
 Stage 7  hierarchy            skill selection and planning
 ```
 
-Stage 2 fine-tune command:
+Next stage fine-tune command:
 
 ```bash
-python friction_curriculum.py train friction_b --run
+python friction_curriculum.py train friction_c --run
 ```
 
 ## Stage 2: Randomized Friction Curriculum
@@ -624,7 +641,8 @@ Current status:
 ```text
 base fixed 0.8              accepted
 friction_a 0.7-0.9          accepted, 300k continuation
-friction_b 0.6-1.0          next
+friction_ab 0.65-0.95       accepted as B-capable checkpoint
+friction_b 0.6-1.0          accepted by AB eval/view/diagnostics
 friction_c 0.5-1.1          pending
 ```
 
@@ -639,6 +657,9 @@ What changed:
 - Centralized accepted baseline paths, friction run directories, viewer
   defaults, and the SB3 device in `project_config.py` to reduce drift between
   scripts and docs.
+- Promoted the AB checkpoint to `CURRENT_BASELINE_MODEL` after it passed the
+  full B range, so viewers and future curriculum stages use the best accepted
+  standing policy by default.
 
 Why 300k was accepted for friction A:
 
@@ -654,3 +675,23 @@ Training-length lesson:
 - More PPO steps are not accepted blindly. Each stage must still pass randomized
   eval, fixed-0.8 regression, viewer stability, foot contact, and zero non-foot
   support.
+
+Why AB was accepted as B-capable:
+
+- The AB checkpoint was trained on `0.65-0.95`, but evaluation on the full
+  `0.6-1.0` range stayed clean: 30/30 truncated episodes, `min_upright_score`
+  `0.999`, `foot_contact_error` near `0.0096`, and minimum foot load above
+  `23 N`.
+- Viewer inspection on `0.6-1.0` showed stable standing with no visible lean or
+  vibration.
+- Headless diagnosis showed no tilt-threshold crossing in 30/30 episodes on
+  the full B range.
+- Continued B training from AB created a repeatable FL-heavy left/right load
+  bias before tilt. That makes extra B fine-tuning a regression, not a required
+  curriculum step.
+- `friction_curriculum.py train friction_b` is intentionally disabled; B eval
+  and view commands use the AB checkpoint, and friction C training loads from
+  AB.
+- The rejected local B/ABB experiment folders were deleted after their failure
+  signatures were documented. Accepted checkpoints remain local/out-of-band
+  because `runs/` is gitignored.

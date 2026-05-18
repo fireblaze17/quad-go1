@@ -10,7 +10,7 @@ baseline is not overwritten.
 ```text
 runs/stand_base_v2
 -> runs/stand_friction_a_07_09
--> runs/stand_friction_b_06_10
+-> runs/stand_friction_ab_065_095  (accepted as B-capable)
 -> runs/stand_friction_c_05_11
 ```
 
@@ -24,8 +24,9 @@ conda activate chrono-go1
 ```
 
 Shared baseline paths and run directories are defined in `project_config.py`.
-`friction_curriculum.py` uses those constants so friction B loads the accepted
-friction A checkpoint by default.
+`friction_curriculum.py` uses those constants so friction C loads the accepted
+B-capable AB checkpoint by default. Friction B is marked accepted via AB rather
+than retrained into the rejected B continuation folders.
 
 ## Stage 0: Preserve The Base
 
@@ -173,29 +174,118 @@ python friction_curriculum.py view friction_a --run
 
 Range: `0.6-1.0`
 
-Train only after Friction A is accepted:
+Status: accepted via AB checkpoint generalization.
 
-```bash
-python friction_curriculum.py train friction_b --run
+Accepted checkpoint:
+
+```text
+runs/stand_friction_ab_065_095/final_model.zip
 ```
 
-Evaluate on the randomized range:
+Accepted randomized-range evaluation on `0.6-1.0`:
+
+```text
+survival_rate: 1.000
+mean_length: 1000.0
+termination_reasons: {'truncated': 30}
+min_upright_score: 0.999
+foot_contact_error: 0.009621
+min_foot_load: 23.393599
+mean_abs_xz_vel: 0.011832
+tilt_error: 0.001289
+leg_symmetry_error: 0.000455
+friction_min_seen: 0.610
+friction_max_seen: 0.999
+```
+
+Headless diagnosis on `0.6-1.0`:
+
+```text
+survival_rate: 1.000
+mean_length: 1000.0
+cause_counts: {'no_tilt_threshold_crossing': 30}
+max_tilt_error: 0.001971
+min_upright_score: 0.999014
+max_nonfoot_load: 0.0
+```
+
+Viewer check: accepted visually on the full B range with no obvious lean,
+vibration, permanent foot unload, or non-foot support.
+
+Why this is accepted:
+
+- AB was trained on `0.65-0.95`, but it generalized cleanly to `0.6-1.0`.
+- The full B range is therefore not inherently too hard for the standing policy.
+- Additional B fine-tuning made the policy worse, so the accepted checkpoint is
+  the clean generalizing checkpoint rather than the most recently trained one.
+
+The direct A-to-B run survived but leaned visibly and showed asymmetric foot
+loading. Increasing the tilt penalty to `0.5` made the policy worse, so tilt
+stays at the accepted `0.25` value.
+
+Friction A remains the accepted A-stage checkpoint. AB is now the current
+default B-capable standing baseline in `project_config.py`, and friction C
+loads from AB.
+
+The `sym002` B experiment added a tiny `0.02 * leg_symmetry_error` penalty. It
+survived but did not remove the visible lean and produced a worse contact
+signature than the clean AB reference, so the active symmetry penalty was
+removed again.
+
+B retraining is intentionally disabled in `friction_curriculum.py`. Use the AB
+checkpoint for B evaluation/viewing and only create new B experiment folders if
+there is a specific research question to test.
+
+Runnable headless diagnosis for the accepted B-capable checkpoint:
 
 ```bash
-python friction_curriculum.py eval friction_b --run
+python diagnose_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/ab_on_b_range
+```
+
+The rejected local B/ABB folders were deleted after their failure signatures
+were documented. They are intentionally not part of GitHub and should not be
+required for reproducing the accepted state.
+
+Initial headless diagnosis:
+
+```text
+AB on 0.6-1.0:       no_tilt_threshold_crossing in 30/30 episodes
+ABB on 0.625-0.975: foot_unload_before_tilt in 30/30 episodes
+B from AB on 0.6-1.0: foot_unload_before_tilt in 30/30 episodes
+sym002 on 0.6-1.0:  foot_unload_before_tilt in 30/30 episodes
+```
+
+The leaned policies all showed a consistent left-vs-right load bias with FL as
+the dominant loaded foot and zero non-foot contact. That points at a learned
+support/load-bias attractor during continued training, not hidden calf/thigh/hip
+support and not the B friction range being immediately impossible for the AB
+policy.
+
+Evaluate the accepted B-capable checkpoint on the randomized range:
+
+```bash
+python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30
 ```
 
 Also sanity-check the original fixed friction:
 
 ```bash
-python evaluate_stand.py runs/stand_friction_b_06_10/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
+python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
+```
+
+View with compact and full diagnostics:
+
+```bash
+python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0
+python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --full-diagnostics
 ```
 
 ## Stage 3: Friction C
 
 Range: `0.5-1.1`
 
-Train only after Friction B is accepted:
+Friction C is the next trainable curriculum stage. It loads from the accepted
+AB B-capable checkpoint:
 
 ```bash
 python friction_curriculum.py train friction_c --run

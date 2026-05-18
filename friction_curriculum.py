@@ -18,8 +18,10 @@ from project_config import (
     CURRENT_BASELINE_MODEL,
     FIXED_BASELINE_DIR,
     FIXED_BASELINE_MODEL,
+    FRICTION_AB_DIR,
     FRICTION_A_DIR,
     FRICTION_B_DIR,
+    FRICTION_B_CAPABLE_MODEL,
     FRICTION_C_DIR,
     ORIGINAL_STAND_MODEL,
 )
@@ -36,11 +38,13 @@ class FrictionStage:
     load_model: Path
     friction_min: float
     friction_max: float
+    accepted_model: Path | None = None
     timesteps: int = 300_000
+    trainable: bool = True
 
     @property
     def model_path(self) -> Path:
-        return self.save_dir / "final_model.zip"
+        return self.accepted_model or self.save_dir / "final_model.zip"
 
 
 STAGES = {
@@ -57,11 +61,13 @@ STAGES = {
         load_model=CURRENT_BASELINE_MODEL,
         friction_min=0.6,
         friction_max=1.0,
+        accepted_model=FRICTION_B_CAPABLE_MODEL,
+        trainable=False,
     ),
     "friction_c": FrictionStage(
         name="friction_c",
         save_dir=FRICTION_C_DIR,
-        load_model=FRICTION_B_DIR / "final_model.zip",
+        load_model=FRICTION_B_CAPABLE_MODEL,
         friction_min=0.5,
         friction_max=1.1,
     ),
@@ -77,6 +83,11 @@ def _path(path: Path) -> str:
 
 
 def train_command(stage: FrictionStage) -> list[str]:
+    if not stage.trainable:
+        raise ValueError(
+            f"{stage.name} is accepted via {stage.model_path}; "
+            "do not retrain this stage blindly."
+        )
     return [
         _python(),
         "train_stand.py",
@@ -180,7 +191,12 @@ def check_pychrono_parser_access() -> None:
 
 
 def print_status() -> None:
-    paths = [BASE_MODEL] + [stage.model_path for stage in STAGES.values()]
+    paths = [BASE_MODEL, FRICTION_A_DIR / "final_model.zip", FRICTION_AB_DIR / "final_model.zip"]
+    paths.extend(
+        stage.model_path
+        for stage in STAGES.values()
+        if stage.model_path not in paths
+    )
     for path in paths:
         state = "exists" if path.exists() else "missing"
         print(f"{state:<7} {path}")
@@ -219,7 +235,10 @@ def main() -> None:
         print_command([_python(), "friction_curriculum.py", "prepare-base"])
         for stage in STAGES.values():
             print(f"\n# Train {stage.name}")
-            print_command(train_command(stage))
+            if stage.trainable:
+                print_command(train_command(stage))
+            else:
+                print(f"# {stage.name} is accepted via {stage.model_path}; no train command.")
             print(f"# Evaluate {stage.name}")
             print_command(eval_command(stage.model_path, stage.friction_min, stage.friction_max, 10))
             print(f"# View {stage.name}")
@@ -231,6 +250,12 @@ def main() -> None:
 
     stage = STAGES[args.stage]
     if args.action == "train":
+        if not stage.trainable:
+            raise SystemExit(
+                f"{stage.name} is accepted via {stage.model_path}; "
+                "skip retraining and use eval/view, or run train_stand.py manually "
+                "with a new experiment folder if you intentionally want a new test."
+            )
         run_or_print(train_command(stage), args.run)
     elif args.action == "eval":
         run_or_print(

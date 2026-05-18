@@ -19,9 +19,11 @@ Stage 2 - standing policy, flat terrain, randomized friction
 Status:
   accepted fixed-friction baseline
   accepted friction A baseline, randomized friction=0.7-0.9
+  accepted B-capable checkpoint, validated on randomized friction=0.6-1.0
 
-Current baseline:
-  checkpoint:    runs/stand_friction_a_07_09/final_model.zip
+Current/default baseline:
+  checkpoint:    runs/stand_friction_ab_065_095/final_model.zip
+  validated on:  randomized friction=0.6-1.0
   home pose:     [hip=0.0, thigh=0.7, calf=-1.4] per leg
   spawn height:  0.34 m
   action scale:  0.20 rad normalized offset
@@ -40,9 +42,11 @@ Solved:
   - Visible vibration after the contact/support fix
   - WSL Ubuntu runtime after native Windows Smart App Control blocked PyChrono DLLs
   - Friction A randomized-friction continuation
+  - B-range generalization from the AB checkpoint without extra B fine-tuning
 
 Next:
-  - train friction B, randomized friction=0.6-1.0
+  - train/evaluate friction C from the AB B-capable checkpoint
+  - use headless diagnostics before any further standing fine-tuning
   - keep fixed-friction 0.8 regression checks
   - keep contact diagnostics available while robustness widens
 ```
@@ -61,8 +65,30 @@ Current friction A standing baseline is preserved here:
 runs/stand_friction_a_07_09/final_model.zip
 ```
 
-Both stand for full 1000-step flat-ground episodes with trunk + foot collision
-only. Detailed reward, contact, and experiment rationale live in `docs/`.
+Current B-capable standing checkpoint is preserved here:
+
+```text
+runs/stand_friction_ab_065_095/final_model.zip
+```
+
+All accepted standing checkpoints run full 1000-step flat-ground episodes with
+trunk + foot collision only. The B-capable checkpoint was trained on
+`0.65-0.95` and accepted on `0.6-1.0` after eval, viewer, and headless
+diagnostics showed clean generalization. Detailed reward, contact, and
+experiment rationale live in `docs/`.
+
+`runs/` is intentionally gitignored, so accepted checkpoints are not stored in
+GitHub. A fresh clone can run the code and train from scratch, but reproducing
+the accepted numbers above requires copying these checkpoint folders into
+`runs/` out-of-band.
+
+Required accepted checkpoints:
+
+```text
+runs/stand_base_v2/final_model.zip
+runs/stand_friction_a_07_09/final_model.zip
+runs/stand_friction_ab_065_095/final_model.zip
+```
 
 ## Project Shape
 
@@ -74,6 +100,7 @@ evaluate_stand.py          headless policy evaluation
 view_stand_policy.py       trained-policy viewer with contact diagnostics
 friction_curriculum.py     flat randomized-friction curriculum helper
 project_config.py          shared paths and runtime defaults
+diagnose_policy.py         headless tilt/contact diagnosis
 models/go1/go1_chrono.urdf Chrono-specific Go1 URDF
 chrono_go1_soil.py         SCM deformable terrain milestone
 mujoco/                    MuJoCo baseline (reference only)
@@ -138,9 +165,40 @@ python view_stand_policy.py runs/stand_friction_a_07_09/final_model.zip --terrai
 python evaluate_stand.py runs/stand_friction_a_07_09/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
 ```
 
-`view_stand_policy.py` defaults to this accepted friction A checkpoint and range
-for VS Code Run-button use. Pass an explicit model path and friction flags when
-viewing older or later checkpoints.
+`view_stand_policy.py` defaults to the accepted B-capable AB checkpoint and
+`0.6-1.0` friction range for VS Code Run-button use. Pass an explicit model path
+and friction flags when viewing older checkpoints.
+
+## Current B-Capable Checkpoint
+
+The clean AB checkpoint generalizes to the full B friction range and is accepted
+as the current B-capable standing policy:
+
+```text
+runs/stand_friction_ab_065_095/final_model.zip
+```
+
+It was trained on `0.65-0.95`, then accepted on `0.6-1.0` because it survived
+30/30 episodes, stayed visually upright in the viewer, kept non-foot loads at
+zero, and did not enter the learned FL-heavy lean seen after additional B
+fine-tuning.
+
+```bash
+# Evaluate AB on full B randomized range
+python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30
+
+# View AB on full B randomized range
+python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0
+
+# Headless tilt/contact diagnosis
+python diagnose_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/ab_on_b_range
+```
+
+Do not keep training on B just to match the folder name. `friction_curriculum.py`
+now treats B as accepted via AB and uses AB as the load checkpoint for friction
+C. The tested B continuations survived but learned a left/right load-bias
+attractor: FL carried too much load, opposite/right-side feet unloaded first,
+and visible lean followed. Use diagnostics before changing reward or physics.
 
 Native Windows PyChrono was abandoned for this project because Windows Smart
 App Control blocked unsigned Chrono extension DLLs such as `Chrono_vehicle.dll`
@@ -170,7 +228,7 @@ Read in this order if you are new to the project:
 ```text
 Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
 Stage 2  train_stand.py       flat terrain, friction A=0.7-0.9       <- accepted
-Stage 2b train_stand.py       flat terrain, friction B=0.6-1.0       <- next
+Stage 2b train_stand.py       flat terrain, friction B=0.6-1.0       <- accepted via AB generalization
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills

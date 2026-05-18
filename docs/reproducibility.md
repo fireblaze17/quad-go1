@@ -85,7 +85,7 @@ The commands below assume `conda activate chrono-go1` has already run.
 Quick syntax check:
 
 ```bash
-python -m py_compile go1_env.py train_stand.py evaluate_stand.py view_env.py view_stand_policy.py diagnostics.py friction_curriculum.py project_config.py
+python -m py_compile go1_env.py diagnostics.py diagnose_policy.py view_env.py view_stand_policy.py evaluate_stand.py train_stand.py friction_curriculum.py project_config.py
 ```
 
 ## Stable-Baselines3 Device Choice
@@ -108,8 +108,27 @@ policy architecture changes substantially, for example to image observations or
 a CNN.
 
 `project_config.py` stores shared project paths and runtime defaults, including
-the accepted friction A baseline, the fixed-friction baseline, the default
-viewer friction range, and the SB3 device.
+the fixed-friction baseline, the accepted friction A baseline, the current
+B-capable AB baseline, the default viewer friction range, and the SB3 device.
+
+## Checkpoint Availability
+
+`runs/` is intentionally gitignored. Accepted checkpoints are local artifacts
+and are not stored in GitHub because model files are much larger than the code
+and docs. A fresh clone can run the environment, train from scratch, and produce
+new checkpoints. Evaluating the accepted results requires copying the accepted
+checkpoint folders into `runs/` out-of-band.
+
+Required checkpoints for reproducing the accepted standing results:
+
+```text
+runs/stand_base_v2/final_model.zip          fixed-friction standing v2
+runs/stand_friction_a_07_09/final_model.zip friction A accepted checkpoint
+runs/stand_friction_ab_065_095/final_model.zip current/default B-capable checkpoint
+```
+
+Keep each checkpoint's `args.json` and `env_constants.json` beside
+`final_model.zip` when sharing or archiving a run.
 
 ## Baseline Commands
 
@@ -141,15 +160,22 @@ View:
 python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
 ```
 
+Curriculum sanity checks:
+
+```bash
+python friction_curriculum.py status
+python friction_curriculum.py all-commands
+```
+
 ## Current Viewer Default
 
-`view_stand_policy.py` now defaults to the accepted friction A checkpoint and
-range, so pressing Run in VS Code opens:
+`view_stand_policy.py` now defaults to the accepted B-capable AB checkpoint and
+the full B range, so pressing Run in VS Code opens:
 
 ```text
-policy:   runs/stand_friction_a_07_09/final_model.zip
+policy:   runs/stand_friction_ab_065_095/final_model.zip
 terrain:  flat
-friction: 0.7-0.9
+friction: 0.6-1.0
 ```
 
 The default console output is compact and focused on the current acceptance
@@ -161,6 +187,41 @@ h up xz act dact jvel tilt foot_min load_imb slip vfoot nonfoot_max
 
 Use `--full-diagnostics` when debugging per-foot heights, foot load ranges, or
 calf/thigh/hip contact loads in detail.
+
+## Current B-Capable Commands
+
+The current/default accepted standing policy is the AB checkpoint, trained on
+`0.65-0.95` and accepted on the full B range `0.6-1.0`.
+
+Evaluate:
+
+```bash
+python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30
+```
+
+View:
+
+```bash
+python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0
+```
+
+Headless tilt/contact diagnosis:
+
+```bash
+python diagnose_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/ab_on_b_range
+```
+
+Expected B-capable signature:
+
+```text
+survival_rate:       1.000
+mean_length:         1000.0
+min_upright_score:   about 0.999
+foot_contact_error:  about 0.010
+min_foot_load:       about 23 N
+nonfoot_load_max:    0
+termination_reasons: {'truncated': 30}
+```
 
 ## Expected Standing V2 Metrics
 

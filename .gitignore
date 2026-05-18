@@ -10,6 +10,7 @@ venv/
 env/
 
 data/
+diagnostics/
 videos/
 runs/
 logs/
