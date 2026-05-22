@@ -85,7 +85,7 @@ The commands below assume `conda activate chrono-go1` has already run.
 Quick syntax check:
 
 ```bash
-python -m py_compile go1_env.py diagnostics.py diagnose_policy.py view_env.py view_stand_policy.py evaluate_stand.py train_stand.py friction_curriculum.py project_config.py
+python -m py_compile go1_env.py diagnostics.py diagnose_policy.py view_env.py view_stand_policy.py evaluate_stand.py train_stand.py friction_curriculum.py run_regression.py project_config.py
 ```
 
 ## Stable-Baselines3 Device Choice
@@ -211,6 +211,17 @@ Headless tilt/contact diagnosis:
 python diagnose_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/ab_on_b_range
 ```
 
+Eval + diagnosis regression wrapper:
+
+```bash
+python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
+```
+
+The wrapper writes `evaluate_stdout.txt`, `diagnose_stdout.txt`,
+`summary.json`, `episodes.json`, and `regression_summary.json` under
+`diagnostics/<name>/`. Use it before accepting any future standing challenger,
+then verify the viewer manually.
+
 Expected B-capable signature:
 
 ```text
@@ -222,6 +233,48 @@ min_foot_load:       about 23 N
 nonfoot_load_max:    0
 termination_reasons: {'truncated': 30}
 ```
+
+## Current C-Range Comparison
+
+The AB checkpoint is also the current C-capable reference. It was trained on
+`0.65-0.95`, accepted for B on `0.6-1.0`, and then tested directly on the wider
+C range `0.5-1.1`.
+
+AB-on-C reference commands:
+
+```bash
+python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
+python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.5 --friction-max 1.1
+```
+
+Expected AB-on-C signature:
+
+```text
+survival_rate:       1.000
+mean_length:         1000.0
+mean_reward:         about 1138.8
+min_upright_score:   about 0.999
+foot_contact_error:  about 0.0094
+min_foot_load:       about 23.4 N
+mean_abs_xz_vel:     about 0.012
+max_abs_xz_vel:      about 0.020
+diagnosis:           no_tilt_threshold_crossing in 100/100 episodes
+nonfoot load:        0
+```
+
+Final C comparison:
+
+| Model | Timesteps | Survival | Upright | Contact error | Min foot load | X/Z drift | Diagnosis | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| AB-on-C | 700k staged | 1.000 | 0.999 | 0.009350 | 23.431 N | 0.011950 | no tilt crossing | accepted |
+| C-from-AB | 1.0M staged | 1.000 | 0.999 | 0.016239 | 20.134 N | 0.045557 | FL-heavy left/right bias | rejected |
+| Scratch C seed1 | 700k | 1.000 | 0.996 | 0.016500 | 19.784 N | 0.024861 | foot unload before tilt | rejected |
+| Scratch C seed2 | 700k | 1.000 | 0.987 | 0.104047 | 15.162 N | 0.044395 | foot unload before tilt | rejected |
+| Scratch C seed3 | 700k | 1.000 | 0.974 | 0.249241 | 5.966 N | 0.039411 | foot unload before tilt | rejected |
+
+This is why reproducibility checks compare challengers against AB-on-C instead
+of assuming the newest, widest-range, or equal-budget scratch model is better.
+Survival is required, but it does not certify clean standing.
 
 ## Expected Standing V2 Metrics
 

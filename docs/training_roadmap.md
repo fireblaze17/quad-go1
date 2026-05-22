@@ -590,6 +590,16 @@ It reports whether foot unload, load imbalance, foot slip, action bias, or joint
 asymmetry appears before tilt. Generated `diagnostics/` outputs are local and
 gitignored.
 
+Eval + diagnosis regression wrapper:
+
+```bash
+python run_regression.py POLICY.zip --name RUN_NAME --friction-min 0.5 --friction-max 1.1 --episodes 100
+```
+
+Use this for standing-policy comparisons before changing the accepted baseline.
+It runs both `evaluate_stand.py` and `diagnose_policy.py`, then writes a compact
+`diagnostics/RUN_NAME/regression_summary.json`.
+
 ---
 
 ## Commands
@@ -620,7 +630,7 @@ python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction
 Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
 Stage 2  train_stand.py       flat terrain, randomized friction A    <- accepted
 Stage 2b train_stand.py       flat terrain, randomized friction B    <- accepted via AB generalization
-Stage 2c train_stand.py       flat terrain, randomized friction C    <- next
+Stage 2c evaluation           flat terrain, randomized friction C    <- AB accepted; C-from-AB/scratch C rejected
 Stage 3  train_walk.py        flat terrain walking
 Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
 Stage 5  rollout collection   learned standing/walking skills
@@ -628,11 +638,8 @@ Stage 6  world model          obs/action/next_obs prediction
 Stage 7  hierarchy            skill selection and planning
 ```
 
-Next stage fine-tune command:
-
-```bash
-python friction_curriculum.py train friction_c --run
-```
+The next robustness topic is reset-noise testing, but no reset-noise code or
+training is part of this C-range comparison.
 
 ## Stage 2: Randomized Friction Curriculum
 
@@ -643,7 +650,7 @@ base fixed 0.8              accepted
 friction_a 0.7-0.9          accepted, 300k continuation
 friction_ab 0.65-0.95       accepted as B-capable checkpoint
 friction_b 0.6-1.0          accepted by AB eval/view/diagnostics
-friction_c 0.5-1.1          pending
+friction_c 0.5-1.1          AB accepted; C-from-AB and scratch seeds rejected
 ```
 
 What changed:
@@ -695,3 +702,56 @@ Why AB was accepted as B-capable:
 - The rejected local B/ABB experiment folders were deleted after their failure
   signatures were documented. Accepted checkpoints remain local/out-of-band
   because `runs/` is gitignored.
+
+Why AB remains preferred on friction C:
+
+- Before accepting a new C checkpoint, the AB baseline was tested directly on
+  the wider `0.5-1.1` range.
+- AB-on-C passed 100/100 episodes with `mean_length 1000.0`,
+  `min_upright_score 0.999`, `foot_contact_error 0.009350`,
+  `min_foot_load 23.431 N`, `mean_abs_xz_vel 0.011950`, and no tilt threshold
+  crossing in 100/100 diagnosis episodes.
+- Viewer inspection on `0.5-1.1` looked clean.
+- The first C continuation from AB also survived 100/100 episodes, but it
+  regressed on the acceptance signals that matter for clean standing:
+  `foot_contact_error 0.016239`, `min_foot_load 20.134 N`,
+  `mean_abs_xz_vel 0.045557`, `max_abs_xz_vel 0.064314`, and
+  `leg_symmetry_error 0.003477`.
+- Diagnosis of the C continuation showed a learned left/right load-bias mode:
+  `dominant_loaded_legs {'FL': 85, 'FR': 7, 'RL': 3, 'RR': 5}`,
+  `least_loaded_legs {'RR': 79, ...}`, and worst-case foot X/Z displacement
+  `0.416218`.
+- Three equal-budget direct scratch C seeds used `700k` timesteps each,
+  matching the accepted path budget (`100k` fixed base + `300k` A + `300k` AB).
+  All three survived 100/100 episodes, but none beat AB.
+- Scratch seed1 was the closest scratch challenger, but it was still worse:
+  `mean_reward 1136.552`, `min_upright_score 0.996`, `foot_contact_error
+  0.016500`, `min_foot_load 19.784 N`, `mean_abs_xz_vel 0.024861`,
+  `tilt_error 0.002643`, and `leg_symmetry_error 0.002757`.
+- Scratch seed2 regressed more strongly: `mean_reward 1123.206`,
+  `min_upright_score 0.987`, `foot_contact_error 0.104047`,
+  `min_foot_load 15.162 N`, and `mean_abs_xz_vel 0.044395`.
+- Scratch seed3 was the worst of the scratch challengers: `mean_reward
+  1097.768`, `min_upright_score 0.974`, `foot_contact_error 0.249241`,
+  `min_foot_load 5.966 N`, and `mean_abs_xz_vel 0.039411`.
+- All three scratch seeds showed the same systematic support-bias family:
+  `foot_unload_before_tilt` in 100/100 diagnostic episodes. The exact dominant
+  and unloaded legs varied by seed, but the failure pattern did not.
+- This is the same lesson as B: continued PPO training can find a surviving but
+  worse support attractor, and direct wide-range scratch training can do the
+  same under the current reward. A new model is not accepted merely because it
+  was trained on the nominal wider range or with an equal timestep budget.
+
+Decision:
+
+- Keep `CURRENT_BASELINE_MODEL` on the AB checkpoint.
+- Keep `runs/stand_friction_c_05_11` as a local rejected challenger until its
+  failure signature is no longer useful.
+- Keep `runs/stand_friction_c_scratch_seed1_700k`,
+  `runs/stand_friction_c_scratch_seed2_700k`, and
+  `runs/stand_friction_c_scratch_seed3_700k` as local rejected challengers for
+  comparison.
+- Do not run multi-seed curriculum reproduction yet. Save that for the final
+  standing recipe after reset-noise work is understood.
+- Move next to reset-noise testing from the AB baseline, using the regression
+  runner before accepting any new standing model.
