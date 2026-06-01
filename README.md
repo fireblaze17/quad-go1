@@ -7,101 +7,84 @@ quadruped.
 
 1. Build a stable Go1 simulation in Chrono.
 2. Wrap it as a Gymnasium environment.
-3. Train standing, then locomotion policies.
+3. Train clean standing on flat randomized friction.
 4. Transfer to Chrono SCM deformable terrain.
 5. Collect rollouts, train a world model, and add hierarchical skill selection.
+
+## Docs Map
+
+- [README.md](README.md) - current project overview
+- [docs/reproducibility.md](docs/reproducibility.md) - exact commands and checks
+- [docs/training_roadmap.md](docs/training_roadmap.md) - reward decisions and next work
+- [docs/experiments/friction_curriculum.md](docs/experiments/friction_curriculum.md) - friction A/B/C history
+- [docs/experiments/standing_v2.md](docs/experiments/standing_v2.md) - fixed-friction model card
+- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision/contact debugging trail
+- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono import, solver, and contact notes
 
 ## Current Status
 
 ```text
-Stage 2 - standing policy, flat terrain, randomized friction
+Stage: randomized-friction standing cleanup
 
-Status:
-  accepted fixed-friction baseline
-  accepted friction A baseline, randomized friction=0.7-0.9
-  accepted AB checkpoint, validated on randomized friction=0.6-1.0
-  AB checkpoint also passed friction C=0.5-1.1 eval/view/diagnosis
-  trained C-from-AB challenger rejected for drift and asymmetric support
-  equal-budget scratch C seeds 1/2/3 rejected for foot-unload/load-bias failures
+Archived old baseline:
+  checkpoint: runs/stand_friction_ab_065_095/final_model.zip
+  trained on: friction 0.65-0.95
+  accepted on old criteria: B range 0.6-1.0, stress C range 0.5-1.1
 
-Current/default baseline:
-  checkpoint:    runs/stand_friction_ab_065_095/final_model.zip
-  validated on:  randomized friction=0.6-1.0 and stress-tested on 0.5-1.1
-  decision:      official current standing baseline after C-range comparison
-  home pose:     [hip=0.0, thigh=0.7, calf=-1.4] per leg
-  spawn height:  0.34 m
-  action scale:  0.20 rad normalized offset
-  collision:     trunk + feet only
-  contact:       MaGIC-style Chrono rigid contact settings
-  reward:        upright survival + smoothness + four-foot support
+Current interpretation:
+  AB is still the best archived standing checkpoint, but it is not final-clean.
+  New settled-window diagnostics showed drift/slip even before reset-noise work.
+  Reset-noise experiments are paused until randomized-friction standing is cleaner.
 
-Solved:
-  - Chrono simulation + Y-up world
-  - Chrono-specific Go1 URDF with trunk as the free root
-  - Joint angle observation sign/axis bug
-  - Zero-overhead home-pose spawn with DoAssembly
-  - Stable Chrono home pose and spawn height
-  - Non-foot leg collision support exploit
-  - Raised/unloaded front-left foot stance
-  - Visible vibration after the contact/support fix
-  - WSL Ubuntu runtime after native Windows Smart App Control blocked PyChrono DLLs
-  - Friction A randomized-friction continuation
-  - B-range generalization from the AB checkpoint without extra B fine-tuning
-  - C-range generalization from the same AB checkpoint without accepting C fine-tuning
+Active code path:
+  friction-only standing
+  no reset-noise runtime API
+  old AB-era reward restored
+  diagnostic tooling kept for settled-window and friction-slice checks
 
-Next:
-  - keep AB as the official standing baseline before reset-noise work
-  - use run_regression.py before accepting any future standing challenger
-  - use headless diagnostics before any further standing fine-tuning
-  - keep fixed-friction 0.8 regression checks
-  - keep contact diagnostics available while robustness widens
+Next work:
+  restart before AB, likely from runs/stand_friction_a_07_09/final_model.zip
+  train a cleaner AB replacement on randomized friction
+  use settled diagnostics, fixed-friction slices, and viewer checks before acceptance
 ```
 
-## Accepted Baselines
+## Kept Checkpoints
 
-Fixed-friction standing v2 is preserved here:
-
-```text
-runs/stand_base_v2/final_model.zip
-```
-
-Current friction A standing baseline is preserved here:
+`runs/` is gitignored and model artifacts live out of band.
 
 ```text
-runs/stand_friction_a_07_09/final_model.zip
-```
-
-Current official standing baseline is preserved here:
-
-```text
-runs/stand_friction_ab_065_095/final_model.zip
-```
-
-All accepted standing checkpoints run full 1000-step flat-ground episodes with
-trunk + foot collision only. The official current baseline was trained on
-`0.65-0.95`, accepted on `0.6-1.0`, and then stress-tested successfully on
-the wider C range `0.5-1.1`. The explicitly trained C-from-AB continuation is
-not accepted because it survived by drifting/sliding more and developing a
-left/right load-bias pattern. Detailed reward, contact, and experiment
-rationale live in `docs/`.
-
-Official decision: `runs/stand_friction_ab_065_095/final_model.zip` remains the
-current/default baseline. It is better than the trained C-from-AB checkpoint and
-all three equal-budget scratch-C seeds on clean standing quality, not just
-survival.
-
-`runs/` is intentionally gitignored, so accepted checkpoints are not stored in
-GitHub. A fresh clone can run the code and train from scratch, but reproducing
-the accepted numbers above requires copying these checkpoint folders into
-`runs/` out-of-band.
-
-Required accepted checkpoints:
-
-```text
+runs/stand/final_model.zip
 runs/stand_base_v2/final_model.zip
 runs/stand_friction_a_07_09/final_model.zip
+runs/stand_friction_a_07_09_300k/final_model.zip
 runs/stand_friction_ab_065_095/final_model.zip
+runs/accepted_backups/
+runs/stand_reset_noise_a_slip0005_fullc_from50k_25k/  # archived reference only
 ```
+
+The reset-noise `slip25` run is kept only as historical evidence. The cleaned
+runtime does not support reset-noise evaluation right now.
+
+## Current Reward
+
+The active environment is back to the old friction-era reward shape:
+
+```text
+alive_bonus:      1.00
+upright:          0.15
+pose:             0.30
+control:          0.03
+joint_velocity:   0.01
+action_rate:      0.03
+tilt:             0.25
+angular_velocity: 0.01
+xz_velocity:      0.20
+foot_contact:     0.10
+```
+
+Removed from active reward/code: reset-noise profiles, clean-standing bonus,
+direct load-balance reward experiments, foot-slip reward experiments,
+contact-switch reward pressure, and reset-noise comparison modes.
 
 ## Project Shape
 
@@ -110,247 +93,107 @@ go1_env.py                 Chrono Gymnasium environment
 view_env.py                zero-action/live test harness
 train_stand.py             PPO standing-policy training
 evaluate_stand.py          headless policy evaluation
-view_stand_policy.py       trained-policy viewer with contact diagnostics
+view_stand_policy.py       trained-policy viewer
 friction_curriculum.py     flat randomized-friction curriculum helper
 project_config.py          shared paths and runtime defaults
-diagnose_policy.py         headless tilt/contact diagnosis
+diagnose_policy.py         headless settled-window diagnosis
 run_regression.py          eval + diagnosis regression runner
+compare_friction_slices.py fixed-friction AB-vs-candidate comparison
+nominal_load_sanity.py     zero-action/home-pose load sanity check
 models/go1/go1_chrono.urdf Chrono-specific Go1 URDF
 chrono_go1_soil.py         SCM deformable terrain milestone
-mujoco/                    MuJoCo baseline (reference only)
+mujoco/                    MuJoCo baseline, historical reference only
 docs/                      decision logs and roadmap
 ```
 
 ## Quick Start
 
-The active development environment is WSL Ubuntu, not native Windows. Create
-and activate the conda environment inside WSL:
+The active development environment is WSL Ubuntu with the `chrono-go1` conda
+environment:
 
 ```bash
-conda env create -f environment.yml
 conda activate chrono-go1
 ```
 
-After activation, use `python` for project commands. On Ankus's WSL machine,
-the equivalent explicit interpreter is:
+After activation, use `python`.
 
 ```bash
-/home/ankus/miniforge3/envs/chrono-go1/bin/python
-```
-
-```bash
-# View environment with zero policy action
+# View zero-action environment
 python view_env.py
 
-# Train standing policy
-python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000
+# Train fixed-friction standing
+python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
 
-# Evaluate
-python evaluate_stand.py runs/stand/final_model.zip
+# Evaluate a policy
+python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
 
-# Run eval + diagnosis and save a compact summary
-python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
-
-# View trained policy
+# View a policy
 python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
-
-# Prepare and inspect the flat friction curriculum commands
-python friction_curriculum.py prepare-base
-python friction_curriculum.py all-commands
 ```
 
-## Current Friction A Commands
+## Current Comparison Workflow
 
-Friction A is the accepted first randomized-friction stage. The accepted
-checkpoint is:
-
-```text
-runs/stand_friction_a_07_09/final_model.zip
-```
+Survival is required, but it is not enough. A candidate must also improve
+settled drift, contact quality, foot load, and viewer behavior.
 
 ```bash
-# Train friction A from the accepted base for 300k steps
-python train_stand.py --terrain flat --friction-min 0.7 --friction-max 0.9 --load runs/stand_base_v2/final_model.zip --save-dir runs/stand_friction_a_07_09 --timesteps 300000
+# One friction range: evaluation + diagnosis
+python run_regression.py POLICY.zip --name RUN_NAME --friction-min 0.5 --friction-max 1.1 --episodes 100
 
-# Evaluate friction A across its randomized range
-python evaluate_stand.py runs/stand_friction_a_07_09/final_model.zip --terrain flat --friction-min 0.7 --friction-max 0.9 --episodes 10
+# Fixed-friction slices against archived AB
+python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate POLICY.zip --name RUN_NAME_slices --episodes 100
 
-# View friction A across its randomized range
-python view_stand_policy.py runs/stand_friction_a_07_09/final_model.zip --terrain flat --friction-min 0.7 --friction-max 0.9
+# Nominal home-pose load sanity
+python nominal_load_sanity.py --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
 
-# Sanity-check friction A at fixed 0.8
-python evaluate_stand.py runs/stand_friction_a_07_09/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
+# Viewer check
+python view_stand_policy.py POLICY.zip --terrain flat --friction-min 0.5 --friction-max 1.1
 ```
 
-`view_stand_policy.py` defaults to the accepted B-capable AB checkpoint and
-`0.6-1.0` friction range for VS Code Run-button use. Pass an explicit model path
-and friction flags when viewing older checkpoints.
+## Next Training Direction
 
-## Current B-Capable Checkpoint
-
-The clean AB checkpoint generalizes to the full B friction range and is accepted
-as the current B-capable standing policy:
-
-```text
-runs/stand_friction_ab_065_095/final_model.zip
-```
-
-It was trained on `0.65-0.95`, then accepted on `0.6-1.0` because it survived
-30/30 episodes, stayed visually upright in the viewer, kept non-foot loads at
-zero, and did not enter the learned FL-heavy lean seen after additional B
-fine-tuning.
+The next branch should rebuild a cleaner randomized-friction AB-style policy
+before returning to reset-noise:
 
 ```bash
-# Evaluate AB on full B randomized range
-python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30
-
-# View AB on full B randomized range
-python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0
-
-# Headless tilt/contact diagnosis
-python diagnose_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.6 --friction-max 1.0 --episodes 30 --out diagnostics/ab_on_b_range
+python train_stand.py \
+  --terrain flat \
+  --friction-min 0.65 \
+  --friction-max 0.95 \
+  --load runs/stand_friction_a_07_09/final_model.zip \
+  --save-dir runs/stand_friction_ab_clean_retry \
+  --timesteps 300000 \
+  --seed 1 \
+  --checkpoint-freq 50000
 ```
 
-Do not keep training on B just to match the folder name. `friction_curriculum.py`
-now treats B as accepted via AB and uses AB as the load checkpoint for friction
-C. The tested B continuations survived but learned a left/right load-bias
-attractor: FL carried too much load, opposite/right-side feet unloaded first,
-and visible lean followed. Use diagnostics before changing reward or physics.
-
-## Current C-Range Finding
-
-Official current baseline after C comparison:
-
-```text
-runs/stand_friction_ab_065_095/final_model.zip
-```
-
-Five C-range comparisons now exist. All were evaluated on flat terrain with
-randomized friction `0.5-1.1` for 100 episodes. Survival alone is not enough:
-the standing baseline must also stay upright, avoid steady sliding, keep clean
-four-foot support, and avoid a repeatable load-bias attractor.
-
-| Model family | Training path | Timesteps | Survival | Upright | Contact error | Min foot load | X/Z drift | Diagnosis pattern | Decision |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| AB-on-C | fixed 0.8 -> A -> AB, tested on C | 700k staged | 1.000 | 0.999 | 0.009350 | 23.431 N | 0.011950 | no tilt crossing; mostly diagonal load | accepted/current baseline |
-| C-from-AB | fixed 0.8 -> A -> AB -> C | 1.0M staged | 1.000 | 0.999 | 0.016239 | 20.134 N | 0.045557 | no tilt crossing, but FL-heavy left/right bias | rejected: drift/sliding and asymmetric support |
-| Scratch C seed1 | random init -> C | 700k | 1.000 | 0.996 | 0.016500 | 19.784 N | 0.024861 | foot unload before tilt in 100/100; FL-heavy | rejected: worse contact/upright/load balance |
-| Scratch C seed2 | random init -> C | 700k | 1.000 | 0.987 | 0.104047 | 15.162 N | 0.044395 | foot unload before tilt in 100/100; left/right bias | rejected: large contact/upright regression |
-| Scratch C seed3 | random init -> C | 700k | 1.000 | 0.974 | 0.249241 | 5.966 N | 0.039411 | foot unload before tilt in 100/100; FL unloaded | rejected: severe contact/upright regression |
-
-Run the C comparison battery with:
+Then compare it against archived AB:
 
 ```bash
-python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_c_05_11/final_model.zip --name c_from_ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_c_scratch_seed1_700k/final_model.zip --name c_scratch_seed1_700k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_c_scratch_seed2_700k/final_model.zip --name c_scratch_seed2_700k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_c_scratch_seed3_700k/final_model.zip --name c_scratch_seed3_700k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-
-# Viewer still matters before accepting a challenger.
-python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.5 --friction-max 1.1
+python run_regression.py runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
+python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_slices --episodes 100
 ```
 
-AB-on-C reference signature:
+## Metrics Glossary
 
 ```text
-survival_rate:       1.000
-mean_length:         1000.0
-mean_reward:         1138.815
-min_upright_score:   0.999
-foot_contact_error:  0.009350
-min_foot_load:       23.431 N
-mean_abs_xz_vel:     0.011950
-max_abs_xz_vel:      0.019967
-diagnosis:           no_tilt_threshold_crossing in 100/100 episodes
-max_nonfoot_load:    0.000000
+survival_rate              fraction of episodes reaching max steps
+mean_abs_xz_vel            average horizontal trunk velocity magnitude
+settled_mean_abs_xz_vel    same metric in the final settled window
+base_xz_displacement       final/settled trunk drift from reset position
+foot_contact_error         missing-load/contact quality penalty signal
+min_foot_load              lowest per-foot vertical contact load
+dominant_loaded_leg        foot carrying most load most often
+least_loaded_leg           foot carrying least load most often
+contact_switch_count       per-foot contact toggles in a window
+foot_slip_distance         contact-conditioned tangential foot motion
 ```
 
-The first trained C-from-AB challenger at
-`runs/stand_friction_c_05_11/final_model.zip` survived 100/100 episodes, but
-is rejected for now. It had worse drift/contact quality than AB:
+## Notes
 
-```text
-foot_contact_error:  0.016239
-min_foot_load:       20.134 N
-mean_abs_xz_vel:     0.045557
-max_abs_xz_vel:      0.064314
-leg_symmetry_error:  0.003477
-diagnosis:           FL dominant-loaded in 85/100, RR least-loaded in 79/100
-max_foot_dxz:        0.416218
-```
-
-The first equal-budget direct scratch C challenger used the same total budget as
-the successful curriculum path (`700k` timesteps). It also survived 100/100
-episodes, but it is rejected as a challenger to AB:
-
-```text
-model:               runs/stand_friction_c_scratch_seed1_700k/final_model.zip
-mean_reward:         1136.552
-min_upright_score:   0.996
-foot_contact_error:  0.016500
-min_foot_load:       19.784 N
-mean_abs_xz_vel:     0.024861
-max_abs_xz_vel:      0.032744
-tilt_error:          0.002643
-leg_symmetry_error:  0.002757
-diagnosis:           foot_unload_before_tilt in 100/100 episodes
-load bias:           FL dominant-loaded in 97/100, left_vs_right in 100/100
-```
-
-This is the same family of failure seen in rejected B continuations and the
-rejected C-from-AB run: the policy survives but uses an asymmetric support mode.
-Scratch-C seeds 2 and 3 made the point stronger, not weaker: both survived all
-100 episodes, but both had much worse upright/contact scores and repeated
-`foot_unload_before_tilt` in 100/100 episodes. Keep AB as the current/default
-baseline unless a future experiment beats the AB reference on eval, diagnosis,
-and viewer behavior.
-
-Native Windows PyChrono was abandoned for this project because Windows Smart
-App Control blocked unsigned Chrono extension DLLs such as `Chrono_vehicle.dll`
-and `_parsers.pyd`. If you hit that import failure, use WSL Ubuntu and the WSL
-conda environment instead. See [docs/reproducibility.md](docs/reproducibility.md)
-for the detailed recovery notes.
-
-## Document Map
-
-Read in this order if you are new to the project:
-
-- [docs/reproducibility.md](docs/reproducibility.md) - install steps,
-  commands, accepted metrics, and non-determinism notes
-- [docs/experiments/standing_v2.md](docs/experiments/standing_v2.md) - model
-  card for the accepted flat-ground standing baseline
-- [docs/experiments/friction_curriculum.md](docs/experiments/friction_curriculum.md) -
-  randomized-friction curriculum stages and commands
-- [docs/training_roadmap.md](docs/training_roadmap.md) - reward history,
-  diagnostics, what worked, and what did not
-- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono import,
-  solver, contact, home pose, and reset decisions
-- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision and
-  contact debugging trail
-
-## Roadmap
-
-```text
-Stage 1  train_stand.py       flat terrain, fixed friction=0.8       <- accepted
-Stage 2  train_stand.py       flat terrain, friction A=0.7-0.9       <- accepted
-Stage 2b train_stand.py       flat terrain, friction B=0.6-1.0       <- accepted via AB generalization
-Stage 2c evaluation           flat terrain, friction C=0.5-1.1       <- AB accepted; C-from-AB and scratch C seeds rejected
-Stage 3  train_walk.py        flat terrain walking
-Stage 4  train_walk_scm.py    SCM deformable terrain fine-tuning
-Stage 5  rollout collection   learned standing/walking skills
-Stage 6  world model          obs/action/next_obs prediction
-Stage 7  hierarchy            skill selection and planning
-```
-
-Training runs write two metadata files next to the saved policy:
-
-```text
-args.json
-env_constants.json
-```
-
-Keep those with any checkpoint that gets reported or shared.
-
-Shared paths and defaults, including the current baseline and SB3 CPU device,
-live in `project_config.py`.
+- AB passed the old B/C survival and visual checks, but settled diagnostics now
+  show it still creeps/slips enough that it should not be treated as final.
+- Reset-noise work exposed the problem more clearly; it did not create the root
+  issue.
+- The codebase is intentionally back to friction-only training so the standing
+  controller can be fixed at the source before adding robustness knobs again.

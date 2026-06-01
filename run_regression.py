@@ -8,8 +8,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -20,6 +20,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--friction-max", type=float, default=1.1)
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--early-window-steps", type=int, default=250)
+    parser.add_argument("--settled-window-steps", type=int, default=250)
     parser.add_argument(
         "--diagnostics-root",
         type=Path,
@@ -108,6 +110,7 @@ def compact_summary(
 ) -> dict[str, Any]:
     reward_terms = eval_metrics.get("mean_reward_terms", {})
     worst_case = diagnose_summary.get("worst_case", {})
+    settled_window = diagnose_summary.get("window_means", {}).get("settled_window", {})
     return {
         "name": args.name,
         "policy": str(args.policy),
@@ -129,11 +132,28 @@ def compact_summary(
             "mean_abs_xz_vel": reward_terms.get("mean_abs_xz_vel"),
             "max_abs_xz_vel": reward_terms.get("max_abs_xz_vel"),
             "tilt_error": reward_terms.get("tilt_error"),
+            "trunk_stance_center_error": reward_terms.get("trunk_stance_center_error"),
+            "trunk_stance_center_dx": reward_terms.get("trunk_stance_center_dx"),
+            "trunk_stance_center_dz": reward_terms.get("trunk_stance_center_dz"),
             "leg_symmetry_error": reward_terms.get("leg_symmetry_error"),
+            "settled_mean_abs_xz_vel": settled_window.get("mean_abs_xz_vel"),
+            "settled_base_displacement_from_reset": settled_window.get("base_displacement_from_reset"),
+            "settled_yaw_drift_from_reset": settled_window.get("yaw_drift_from_reset"),
+            "settled_mean_trunk_x_up": settled_window.get("mean_trunk_x_up"),
+            "settled_mean_trunk_y_up": settled_window.get("mean_trunk_y_up"),
+            "settled_mean_tilt_error": settled_window.get("mean_tilt_error"),
+            "settled_min_foot_load": settled_window.get("min_foot_load"),
+            "settled_total_contact_foot_slip_distance": settled_window.get("total_contact_foot_slip_distance"),
+            "settled_total_contact_switches": settled_window.get("total_contact_switches"),
+            "settled_action_pair_delta": settled_window.get("action_pair_delta"),
+            "settled_foot_load_shares": settled_window.get("foot_load_shares"),
+            "settled_contact_duty": settled_window.get("contact_duty"),
         },
         "diagnosis": {
             "cause_counts": diagnose_summary.get("cause_counts"),
             "top_cause": _top_count(diagnose_summary.get("cause_counts")),
+            "failure_type_counts": diagnose_summary.get("failure_type_counts"),
+            "top_failure_type": _top_count(diagnose_summary.get("failure_type_counts")),
             "final_tilt_directions": diagnose_summary.get("final_tilt_directions"),
             "top_final_tilt_direction": _top_count(diagnose_summary.get("final_tilt_directions")),
             "dominant_load_axes": diagnose_summary.get("dominant_load_axes"),
@@ -145,19 +165,16 @@ def compact_summary(
             "max_tilt_error": worst_case.get("max_tilt_error"),
             "max_load_imbalance": worst_case.get("max_load_imbalance"),
             "max_foot_dxz": worst_case.get("max_foot_dxz"),
+            "max_trunk_stance_center_error": worst_case.get("max_trunk_stance_center_error"),
             "max_nonfoot_load": worst_case.get("max_nonfoot_load"),
             "min_foot_load": worst_case.get("min_foot_load"),
             "min_upright_score": worst_case.get("min_upright_score"),
+            "worst_episodes": diagnose_summary.get("worst_episodes"),
         },
     }
 
 
-def main() -> None:
-    args = parse_args()
-    if not args.policy.exists():
-        raise FileNotFoundError(f"Policy not found: {args.policy}")
-
-    out_dir = args.diagnostics_root / args.name
+def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     eval_command = [
@@ -189,6 +206,10 @@ def main() -> None:
         str(args.episodes),
         "--max-steps",
         str(args.max_steps),
+        "--early-window-steps",
+        str(args.early_window_steps),
+        "--settled-window-steps",
+        str(args.settled_window_steps),
         "--out",
         str(out_dir),
     ]
@@ -201,7 +222,9 @@ def main() -> None:
     _run_command(diagnose_command, out_dir / "diagnose_stdout.txt")
     diagnose_summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
 
-    summary = compact_summary(args, eval_metrics, diagnose_summary)
+    summary_args = SimpleNamespace(**vars(args))
+    summary_args.name = name
+    summary = compact_summary(summary_args, eval_metrics, diagnose_summary)
     summary_path = out_dir / "regression_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -218,6 +241,15 @@ def main() -> None:
         f"xz={eval_block['mean_abs_xz_vel']:.6f} "
         f"cause={diagnosis_block['top_cause']}"
     )
+    return summary
+
+def main() -> None:
+    args = parse_args()
+    if not args.policy.exists():
+        raise FileNotFoundError(f"Policy not found: {args.policy}")
+
+    out_dir = args.diagnostics_root / args.name
+    run_condition(args, out_dir, args.name)
 
 
 if __name__ == "__main__":

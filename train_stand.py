@@ -7,6 +7,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.utils import get_schedule_fn
 
 from go1_env import Go1Env, standing_env_metadata
 from project_config import DEFAULT_CHECKPOINT_FREQ, SB3_DEVICE
@@ -22,6 +23,24 @@ def parse_args():
     parser.add_argument("--save-dir", type=Path, default=Path("runs/stand"))
     parser.add_argument("--load", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=3e-4,
+        help="PPO learning rate. Also overrides loaded models for fine-tuning.",
+    )
+    parser.add_argument(
+        "--clip-range",
+        type=float,
+        default=0.2,
+        help="PPO clip range. Also overrides loaded models for fine-tuning.",
+    )
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help="PPO target KL early-stopping threshold.",
+    )
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
@@ -59,6 +78,14 @@ def save_run_metadata(args) -> None:
     )
 
 
+def apply_ppo_overrides(model: PPO, args) -> None:
+    model.learning_rate = args.learning_rate
+    model.lr_schedule = get_schedule_fn(args.learning_rate)
+    model.clip_range = get_schedule_fn(args.clip_range)
+    model.target_kl = args.target_kl
+    model.set_random_seed(args.seed)
+
+
 def main() -> None:
     args = parse_args()
     args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +94,7 @@ def main() -> None:
     env = make_env(args)
     if args.load is not None:
         model = PPO.load(args.load, env=env, device=SB3_DEVICE)
+        apply_ppo_overrides(model, args)
     else:
         model = PPO(
             "MlpPolicy",
@@ -76,7 +104,9 @@ def main() -> None:
             seed=args.seed,
             n_steps=1024,
             batch_size=256,
-            learning_rate=3e-4,
+            learning_rate=args.learning_rate,
+            clip_range=args.clip_range,
+            target_kl=args.target_kl,
             gamma=0.99,
         )
 

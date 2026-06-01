@@ -516,11 +516,19 @@ nonfoot_load_max = 0
 
 Reject or retrain if fixed friction `0.8` becomes worse than standing v2.
 
-## Notes
+## Current Cleanup Note
 
-- Do not change reward weights during this curriculum.
 - Do not change collision settings, contact materials, action scale, or home
-  pose.
+  pose while comparing friction-policy candidates.
 - Use `--load` at every curriculum stage after the base.
 - Use a new save directory for each stage.
-- Start reset-noise curriculum only after Friction B or C is accepted.
+- AB was the correct old winner among the friction A/B/C candidates: C-from-AB
+  and scratch-C survived but were rejected on drift, contact, upright, and
+  load-bias evidence.
+- Later settled-window diagnostics showed that AB itself still creeps/slips
+  enough that it should be treated as an archived old baseline, not final-clean
+  standing.
+- The next friction pass should restart before AB, likely from
+  `runs/stand_friction_a_07_09/final_model.zip`, and train a cleaner AB
+  replacement before any reset-noise work returns.
+- Survival-only is not a valid standing acceptance criterion.

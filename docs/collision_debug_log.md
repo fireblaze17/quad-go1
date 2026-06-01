@@ -211,3 +211,11 @@ mean_foot_load:     32.09 N
 min_foot_load:      17.58 N
 foot_contact_error: 0.020
 ```
+
+## Later Standing-Quality Note
+
+Later drift/slip failures are not the old non-foot collision exploit returning.
+Diagnostics continue to report zero calf/thigh/hip support. The current
+standing-quality issues are policy problems: horizontal creeping, contact
+quality, load bias, and occasional persistent lean while supported only by trunk
++ feet collision.

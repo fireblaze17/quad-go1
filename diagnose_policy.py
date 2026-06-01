@@ -20,7 +20,7 @@ from diagnostics import (
     foot_debug_stats,
     foot_xz_positions,
 )
-from go1_env import Go1Env
+from go1_env import Go1Env, _TIME_STEP
 from project_config import SB3_DEVICE
 
 
@@ -55,6 +55,18 @@ def parse_args():
         "--log-every-step",
         action="store_true",
         help="Write timeline.csv with one row per environment step.",
+    )
+    parser.add_argument(
+        "--early-window-steps",
+        type=int,
+        default=250,
+        help="Number of initial steps to summarize as the early recovery window.",
+    )
+    parser.add_argument(
+        "--settled-window-steps",
+        type=int,
+        default=250,
+        help="Number of final steps to summarize as the settled standing window.",
     )
     return parser.parse_args()
 
@@ -102,6 +114,136 @@ def _max_pair_delta(pair_sums: dict[str, float]) -> float:
         abs(pair_sums["left"] - pair_sums["right"]),
         abs(pair_sums["diag_fr_rl"] - pair_sums["diag_fl_rr"]),
     ))
+
+
+def _yaw_from_obs(obs: np.ndarray) -> float:
+    qw, qx, qy, qz = (float(value) for value in obs[3:7])
+    forward_x = 1.0 - 2.0 * (qy * qy + qz * qz)
+    forward_z = 2.0 * (qx * qz - qw * qy)
+    return float(np.arctan2(forward_z, forward_x))
+
+
+def _angle_delta(current: float, reference: float) -> float:
+    return float(np.arctan2(np.sin(current - reference), np.cos(current - reference)))
+
+
+def _empty_window_summary() -> dict[str, Any]:
+    return {
+        "steps": 0,
+        "mean_lin_vel_x": 0.0,
+        "mean_lin_vel_z": 0.0,
+        "mean_abs_xz_vel": 0.0,
+        "mean_xz_speed": 0.0,
+        "base_displacement_from_reset": 0.0,
+        "yaw_drift_from_reset": 0.0,
+        "mean_trunk_x_up": 0.0,
+        "mean_trunk_y_up": 0.0,
+        "mean_abs_trunk_x_up": 0.0,
+        "mean_abs_trunk_y_up": 0.0,
+        "mean_tilt_error": 0.0,
+        "min_foot_load": 0.0,
+        "foot_load_shares": {leg: 0.0 for leg in LEG_PREFIXES},
+        "contact_duty": {leg: 0.0 for leg in LEG_PREFIXES},
+        "contact_switches": {leg: 0 for leg in LEG_PREFIXES},
+        "contact_foot_slip_distance": {leg: 0.0 for leg in LEG_PREFIXES},
+        "total_contact_foot_slip_distance": 0.0,
+        "foot_world_displacement": {leg: 0.0 for leg in LEG_PREFIXES},
+        "action_mean_per_joint": [0.0] * 12,
+        "action_std_per_joint": [0.0] * 12,
+        "action_mean_abs_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
+        "action_pair_delta": 0.0,
+        "joint_error_from_nominal": 0.0,
+    }
+
+
+def _window_summary(
+    records: list[dict[str, Any]],
+    reset_base_xz: tuple[float, float],
+    reset_yaw: float,
+    home_joint_angles: np.ndarray,
+) -> dict[str, Any]:
+    if not records:
+        return _empty_window_summary()
+
+    lin_x = np.array([item["lin_vel_x"] for item in records], dtype=np.float64)
+    lin_z = np.array([item["lin_vel_z"] for item in records], dtype=np.float64)
+    xz_speed = np.sqrt(lin_x ** 2 + lin_z ** 2)
+    trunk_x_up = np.array([item["trunk_x_up"] for item in records], dtype=np.float64)
+    trunk_y_up = np.array([item["trunk_y_up"] for item in records], dtype=np.float64)
+    tilt_error = np.array([item["tilt_error"] for item in records], dtype=np.float64)
+    actions = np.stack([item["action"] for item in records]).astype(np.float64)
+    joints = np.stack([item["joint_pos"] for item in records]).astype(np.float64)
+    final = records[-1]
+    base_dx = float(final["base_x"] - reset_base_xz[0])
+    base_dz = float(final["base_z"] - reset_base_xz[1])
+
+    contact_duty = {}
+    contact_switches = {}
+    slip_distance = {}
+    foot_displacement = {}
+    load_shares = {}
+    min_foot_load = float("inf")
+    for index, leg in enumerate(LEG_PREFIXES):
+        contacts = [item["contacts"][index] for item in records]
+        contact_duty[leg] = float(np.mean(contacts))
+        contact_switches[leg] = int(sum(item["contact_switches"][index] for item in records))
+        slip_distance[leg] = float(sum(item["contact_slip_increment"][index] for item in records))
+        foot_displacement[leg] = float(final["foot_displacements"][index])
+        load_shares[leg] = float(np.mean([item["foot_load_shares"][index] for item in records]))
+        min_foot_load = min(min_foot_load, min(item["foot_loads"][index] for item in records))
+
+    action_leg_means = _leg_action_means(np.mean(np.abs(actions), axis=0))
+    return {
+        "steps": len(records),
+        "mean_lin_vel_x": float(np.mean(lin_x)),
+        "mean_lin_vel_z": float(np.mean(lin_z)),
+        "mean_abs_xz_vel": float(np.mean(np.abs(np.column_stack([lin_x, lin_z])))),
+        "mean_xz_speed": float(np.mean(xz_speed)),
+        "base_displacement_from_reset": float((base_dx * base_dx + base_dz * base_dz) ** 0.5),
+        "base_dx_from_reset": base_dx,
+        "base_dz_from_reset": base_dz,
+        "yaw_drift_from_reset": _angle_delta(float(final["yaw"]), reset_yaw),
+        "mean_trunk_x_up": float(np.mean(trunk_x_up)),
+        "mean_trunk_y_up": float(np.mean(trunk_y_up)),
+        "mean_abs_trunk_x_up": float(np.mean(np.abs(trunk_x_up))),
+        "mean_abs_trunk_y_up": float(np.mean(np.abs(trunk_y_up))),
+        "mean_tilt_error": float(np.mean(tilt_error)),
+        "min_foot_load": 0.0 if min_foot_load == float("inf") else float(min_foot_load),
+        "foot_load_shares": load_shares,
+        "contact_duty": contact_duty,
+        "contact_switches": contact_switches,
+        "total_contact_switches": int(sum(contact_switches.values())),
+        "contact_foot_slip_distance": slip_distance,
+        "total_contact_foot_slip_distance": float(sum(slip_distance.values())),
+        "foot_world_displacement": foot_displacement,
+        "max_foot_world_displacement": float(max(foot_displacement.values(), default=0.0)),
+        "action_mean_per_joint": np.mean(actions, axis=0).astype(float).tolist(),
+        "action_std_per_joint": np.std(actions, axis=0).astype(float).tolist(),
+        "action_mean_abs_per_leg": action_leg_means,
+        "action_pair_delta": _max_pair_delta(_pair_sums(action_leg_means)),
+        "joint_error_from_nominal": float(np.mean((joints - home_joint_angles) ** 2)),
+    }
+
+
+def _classify_failure(settled: dict[str, Any], final_shares: dict[str, float]) -> str:
+    drift = float(settled.get("base_displacement_from_reset", 0.0))
+    xz_vel = float(settled.get("mean_abs_xz_vel", 0.0))
+    slip = float(settled.get("total_contact_foot_slip_distance", 0.0))
+    switches = int(settled.get("total_contact_switches", 0))
+    action_bias = float(settled.get("action_pair_delta", 0.0))
+    load_delta = max(final_shares.values(), default=0.25) - min(final_shares.values(), default=0.25)
+    tilt = float(settled.get("mean_tilt_error", 0.0))
+
+    moving = drift >= 0.03 or xz_vel >= 0.02
+    if moving and slip >= 0.03:
+        return "foot_slip"
+    if moving and switches >= 2:
+        return "micro_step"
+    if moving or tilt >= 0.001 or load_delta >= 0.25:
+        if action_bias >= _ACTION_BIAS_THRESHOLD or load_delta >= 0.20:
+            return "planted_posture_bias"
+        return "mixed"
+    return "nominal"
 
 
 def _dominant_load_pattern(shares: dict[str, float]) -> dict[str, Any]:
@@ -300,7 +442,11 @@ def diagnose_episode(
     tracked_feet = foot_bodies(env)
     tracked_contacts = contact_body_groups(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
+    reset_base_xz = (float(obs[0]), float(obs[2]))
+    reset_yaw = _yaw_from_obs(obs)
     prev_action = np.zeros(12, dtype=np.float32)
+    prev_contacts = [False] * len(FOOT_BODY_NAMES)
+    records: list[dict[str, Any]] = []
 
     events = {
         "first_tilt": None,
@@ -317,6 +463,7 @@ def diagnose_episode(
         "max_foot_dxz": 0.0,
         "max_foot_vxz": 0.0,
         "max_nonfoot_load": 0.0,
+        "max_trunk_stance_center_error": 0.0,
         "min_foot_load": float("inf"),
         "min_upright_score": float("inf"),
     }
@@ -324,6 +471,9 @@ def diagnose_episode(
         "tilt_error": 0.0,
         "load_imbalance": 0.0,
         "foot_dxz_max": 0.0,
+        "trunk_stance_center_error": 0.0,
+        "trunk_stance_center_dx": 0.0,
+        "trunk_stance_center_dz": 0.0,
         "mean_abs_action": 0.0,
         "leg_symmetry_error": 0.0,
     }
@@ -347,6 +497,16 @@ def diagnose_episode(
         terms = info.get("reward_terms", {})
         foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz)
         contact_stats = contact_debug_stats(tracked_contacts)
+        foot_loads = foot_stats["foot_contact_loads"]
+        contacts = [float(load) > args.unload_threshold for load in foot_loads]
+        contact_switches = [
+            int(step_contact != prev_contact)
+            for step_contact, prev_contact in zip(contacts, prev_contacts)
+        ]
+        contact_slip_increment = [
+            float(speed) * _TIME_STEP if contact else 0.0
+            for speed, contact in zip(foot_stats["foot_speeds"], contacts)
+        ]
 
         _update_first_events(
             events,
@@ -359,12 +519,15 @@ def diagnose_episode(
             args.unload_threshold,
         )
 
-        foot_loads = foot_stats["foot_contact_loads"]
         max_values["max_tilt_error"] = max(max_values["max_tilt_error"], float(terms.get("tilt_error", 0.0)))
         max_values["max_load_imbalance"] = max(max_values["max_load_imbalance"], float(foot_stats["foot_load_imbalance"]))
         max_values["max_foot_dxz"] = max(max_values["max_foot_dxz"], float(foot_stats["foot_dxz_max"]))
         max_values["max_foot_vxz"] = max(max_values["max_foot_vxz"], float(foot_stats["foot_vxz_max"]))
         max_values["max_nonfoot_load"] = max(max_values["max_nonfoot_load"], float(max(contact_stats["nonfoot_loads"])))
+        max_values["max_trunk_stance_center_error"] = max(
+            max_values["max_trunk_stance_center_error"],
+            float(terms.get("trunk_stance_center_error", 0.0)),
+        )
         max_values["min_foot_load"] = min(max_values["min_foot_load"], float(min(foot_loads)))
         max_values["min_upright_score"] = min(
             max_values["min_upright_score"],
@@ -373,8 +536,31 @@ def diagnose_episode(
         totals["tilt_error"] += float(terms.get("tilt_error", 0.0))
         totals["load_imbalance"] += float(foot_stats["foot_load_imbalance"])
         totals["foot_dxz_max"] += float(foot_stats["foot_dxz_max"])
+        totals["trunk_stance_center_error"] += float(terms.get("trunk_stance_center_error", 0.0))
+        totals["trunk_stance_center_dx"] += float(terms.get("trunk_stance_center_dx", 0.0))
+        totals["trunk_stance_center_dz"] += float(terms.get("trunk_stance_center_dz", 0.0))
         totals["mean_abs_action"] += float(terms.get("mean_abs_action", 0.0))
         totals["leg_symmetry_error"] += float(terms.get("leg_symmetry_error", 0.0))
+
+        records.append({
+            "step": steps,
+            "base_x": float(obs[0]),
+            "base_z": float(obs[2]),
+            "yaw": _yaw_from_obs(obs),
+            "lin_vel_x": float(terms.get("lin_vel_x", 0.0)),
+            "lin_vel_z": float(terms.get("lin_vel_z", 0.0)),
+            "trunk_x_up": float(terms.get("trunk_x_up", 0.0)),
+            "trunk_y_up": float(terms.get("trunk_y_up", 0.0)),
+            "tilt_error": float(terms.get("tilt_error", 0.0)),
+            "foot_loads": [float(value) for value in foot_stats["foot_contact_loads"]],
+            "foot_load_shares": [float(value) for value in foot_stats["foot_load_shares"]],
+            "foot_displacements": [float(value) for value in foot_stats["foot_displacements"]],
+            "contacts": contacts,
+            "contact_switches": contact_switches,
+            "contact_slip_increment": contact_slip_increment,
+            "action": action.astype(float).copy(),
+            "joint_pos": obs[13:25].astype(float).copy(),
+        })
 
         if timeline_writer is not None:
             row = _timeline_row(
@@ -392,10 +578,20 @@ def diagnose_episode(
             timeline_writer.writerow(row)
 
         prev_action = action.copy()
+        prev_contacts = contacts
         final_terms = terms
         final_foot_stats = foot_stats
 
     final_shares = _foot_map(final_foot_stats["foot_load_shares"])
+    early_records = records[:max(0, args.early_window_steps)]
+    settled_records = records[-max(0, args.settled_window_steps):] if args.settled_window_steps > 0 else []
+    windows = {
+        "full_episode": _window_summary(records, reset_base_xz, reset_yaw, env.home_joint_angles),
+        "early_window": _window_summary(early_records, reset_base_xz, reset_yaw, env.home_joint_angles),
+        "settled_window": _window_summary(settled_records, reset_base_xz, reset_yaw, env.home_joint_angles),
+    }
+    settled = windows["settled_window"]
+    failure_type = _classify_failure(settled, final_shares)
     summary = {
         "episode": episode,
         "steps": steps,
@@ -413,19 +609,142 @@ def diagnose_episode(
         "final_load_pattern": _dominant_load_pattern(final_shares),
         "events": events,
         "cause_hint": _cause_hint(events),
+        "failure_type": failure_type,
         "event_steps": {key: _event_step(value) for key, value in events.items()},
         "max_values": max_values,
         "means": {
             key: value / max(1, steps)
             for key, value in totals.items()
         },
+        "windows": windows,
     }
     return _json_ready(summary)
+
+
+def _mean_dict_values(items: list[dict[str, float]], keys: tuple[str, ...]) -> dict[str, float]:
+    return {
+        key: float(np.mean([item.get(key, 0.0) for item in items])) if items else 0.0
+        for key in keys
+    }
+
+
+def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[str, Any]:
+    windows = [item["windows"][window_name] for item in episodes if window_name in item.get("windows", {})]
+    if not windows:
+        return _empty_window_summary()
+    scalar_keys = (
+        "mean_lin_vel_x",
+        "mean_lin_vel_z",
+        "mean_abs_xz_vel",
+        "mean_xz_speed",
+        "base_displacement_from_reset",
+        "base_dx_from_reset",
+        "base_dz_from_reset",
+        "yaw_drift_from_reset",
+        "mean_trunk_x_up",
+        "mean_trunk_y_up",
+        "mean_abs_trunk_x_up",
+        "mean_abs_trunk_y_up",
+        "mean_tilt_error",
+        "min_foot_load",
+        "total_contact_switches",
+        "total_contact_foot_slip_distance",
+        "max_foot_world_displacement",
+        "action_pair_delta",
+        "joint_error_from_nominal",
+    )
+    result = {
+        "steps": int(np.mean([window["steps"] for window in windows])),
+        **{
+            key: float(np.mean([window.get(key, 0.0) for window in windows]))
+            for key in scalar_keys
+        },
+        "foot_load_shares": _mean_dict_values(
+            [window["foot_load_shares"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "contact_duty": _mean_dict_values(
+            [window["contact_duty"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "contact_switches": _mean_dict_values(
+            [window["contact_switches"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "contact_foot_slip_distance": _mean_dict_values(
+            [window["contact_foot_slip_distance"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_world_displacement": _mean_dict_values(
+            [window["foot_world_displacement"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "action_mean_abs_per_leg": _mean_dict_values(
+            [window["action_mean_abs_per_leg"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "p95": {
+            key: float(np.percentile([window.get(key, 0.0) for window in windows], 95))
+            for key in (
+                "mean_abs_xz_vel",
+                "base_displacement_from_reset",
+                "mean_tilt_error",
+                "total_contact_foot_slip_distance",
+                "total_contact_switches",
+            )
+        },
+    }
+    return result
+
+
+def _episode_replay_metadata(item: dict[str, Any], metric: str, value: float) -> dict[str, Any]:
+    settled = item.get("windows", {}).get("settled_window", {})
+    pattern = item["final_load_pattern"]
+    return {
+        "episode": item["episode"],
+        "metric": metric,
+        "value": float(value),
+        "friction": item["friction"],
+        "dominant_leg": pattern["dominant_leg"],
+        "least_loaded_leg": pattern["unloaded_leg"],
+        "failure_type": item.get("failure_type"),
+        "final_tilt_direction": item.get("final_tilt_direction"),
+        "settled_summary": {
+            "mean_abs_xz_vel": settled.get("mean_abs_xz_vel"),
+            "base_displacement_from_reset": settled.get("base_displacement_from_reset"),
+            "mean_tilt_error": settled.get("mean_tilt_error"),
+            "total_contact_foot_slip_distance": settled.get("total_contact_foot_slip_distance"),
+            "total_contact_switches": settled.get("total_contact_switches"),
+            "min_foot_load": settled.get("min_foot_load"),
+            "foot_load_shares": settled.get("foot_load_shares"),
+        },
+    }
+
+
+def _top_worst_episodes(episodes: list[dict[str, Any]], top_k: int = 5) -> dict[str, list[dict[str, Any]]]:
+    metrics = {
+        "settled_drift": lambda item: item["windows"]["settled_window"].get("base_displacement_from_reset", 0.0),
+        "settled_tilt": lambda item: item["windows"]["settled_window"].get("mean_tilt_error", 0.0),
+        "settled_load_imbalance": lambda item: (
+            max(item["windows"]["settled_window"].get("foot_load_shares", {}).values(), default=0.0)
+            - min(item["windows"]["settled_window"].get("foot_load_shares", {}).values(), default=0.0)
+        ),
+        "settled_slip": lambda item: item["windows"]["settled_window"].get("total_contact_foot_slip_distance", 0.0),
+    }
+    worst = {}
+    for name, metric_fn in metrics.items():
+        ranked = sorted(episodes, key=metric_fn, reverse=True)[:top_k]
+        worst[name] = [
+            _episode_replay_metadata(item, name, metric_fn(item))
+            for item in ranked
+        ]
+    return worst
 
 
 def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
     failures = sum(1 for item in episodes if item["terminated"])
     cause_counts: dict[str, int] = {}
+    failure_type_counts: dict[str, int] = {}
     tilt_directions: dict[str, int] = {}
     dominant_axes: dict[str, int] = {}
     dominant_legs: dict[str, int] = {}
@@ -433,6 +752,8 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
 
     for item in episodes:
         cause_counts[item["cause_hint"]] = cause_counts.get(item["cause_hint"], 0) + 1
+        failure_type = item.get("failure_type", "unknown")
+        failure_type_counts[failure_type] = failure_type_counts.get(failure_type, 0) + 1
         tilt_directions[item["final_tilt_direction"]] = (
             tilt_directions.get(item["final_tilt_direction"], 0) + 1
         )
@@ -455,6 +776,7 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
         "friction_min_seen": min((item["friction"] for item in episodes), default=None),
         "friction_max_seen": max((item["friction"] for item in episodes), default=None),
         "cause_counts": cause_counts,
+        "failure_type_counts": failure_type_counts,
         "final_tilt_directions": tilt_directions,
         "dominant_load_axes": dominant_axes,
         "dominant_loaded_legs": dominant_legs,
@@ -463,10 +785,20 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
             "max_tilt_error": max((item["max_tilt_error"] for item in max_values), default=0.0),
             "max_load_imbalance": max((item["max_load_imbalance"] for item in max_values), default=0.0),
             "max_foot_dxz": max((item["max_foot_dxz"] for item in max_values), default=0.0),
+            "max_trunk_stance_center_error": max(
+                (item["max_trunk_stance_center_error"] for item in max_values),
+                default=0.0,
+            ),
             "max_nonfoot_load": max((item["max_nonfoot_load"] for item in max_values), default=0.0),
             "min_foot_load": min((item["min_foot_load"] for item in max_values), default=0.0),
             "min_upright_score": min((item["min_upright_score"] for item in max_values), default=0.0),
         },
+        "window_means": {
+            "full_episode": _aggregate_window(episodes, "full_episode"),
+            "early_window": _aggregate_window(episodes, "early_window"),
+            "settled_window": _aggregate_window(episodes, "settled_window"),
+        },
+        "worst_episodes": _top_worst_episodes(episodes),
         "thresholds": {
             "tilt_error": args.tilt_threshold,
             "unload_n": args.unload_threshold,
@@ -474,6 +806,8 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
             "slip_m": _SLIP_THRESHOLD,
             "action_pair_delta": _ACTION_BIAS_THRESHOLD,
             "joint_symmetry_error": _JOINT_BIAS_THRESHOLD,
+            "early_window_steps": args.early_window_steps,
+            "settled_window_steps": args.settled_window_steps,
         },
     })
 
@@ -487,6 +821,7 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     print(f"friction_min_seen: {aggregate['friction_min_seen']:.3f}")
     print(f"friction_max_seen: {aggregate['friction_max_seen']:.3f}")
     print(f"cause_counts: {aggregate['cause_counts']}")
+    print(f"failure_type_counts: {aggregate['failure_type_counts']}")
     print(f"final_tilt_directions: {aggregate['final_tilt_directions']}")
     print(f"dominant_load_axes: {aggregate['dominant_load_axes']}")
     print(f"dominant_loaded_legs: {aggregate['dominant_loaded_legs']}")
@@ -494,6 +829,18 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     print("worst_case:")
     for key, value in aggregate["worst_case"].items():
         print(f"  {key}: {value:.6f}")
+    settled = aggregate["window_means"]["settled_window"]
+    print("settled_window:")
+    for key in (
+        "mean_abs_xz_vel",
+        "base_displacement_from_reset",
+        "mean_tilt_error",
+        "total_contact_foot_slip_distance",
+        "total_contact_switches",
+        "min_foot_load",
+        "action_pair_delta",
+    ):
+        print(f"  {key}: {settled[key]:.6f}")
 
 
 def main() -> None:

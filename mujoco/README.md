@@ -4,6 +4,9 @@ This folder is the old MuJoCo baseline. The active project has moved to Project
 Chrono, but these files stay as reference for reward shaping, Menagerie model
 values, and the first successful standing-policy workflow.
 
+This is historical reference only. The current training source of truth is the
+Chrono environment and docs at the repository root.
+
 Historical milestone:
 
 ```text

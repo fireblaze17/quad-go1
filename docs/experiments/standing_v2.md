@@ -44,6 +44,10 @@ minimum foot load:   20 N
 
 ## Reward Weights
 
+These weights describe the historical fixed-friction standing v2 checkpoint and
+match the restored friction-only reward shape. For current acceptance criteria
+and next experiments, use [../training_roadmap.md](../training_roadmap.md).
+
 ```text
 alive_bonus             1.00
 upright_reward          0.15 * upright_score

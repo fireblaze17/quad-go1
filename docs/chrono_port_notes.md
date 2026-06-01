@@ -6,6 +6,11 @@ the context that forced a decision, what was decided, and what it costs.
 Git history records what was tried. These notes record the current rational
 state.
 
+Current standing-policy experiments are documented in
+[training_roadmap.md](training_roadmap.md) and
+[experiments/friction_curriculum.md](experiments/friction_curriculum.md). This
+file stays focused on Chrono import, contact, reset, and physics decisions.
+
 ---
 
 ## ADR-000: WSL Runtime For PyChrono
