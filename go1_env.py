@@ -46,12 +46,22 @@ _ALIVE_BONUS = 1.0  # reward per surviving step; terrain-agnostic
 _POSE_PENALTY_WEIGHT = 0.30
 _CONTROL_PENALTY_WEIGHT = 0.03
 _ANG_VEL_PENALTY_WEIGHT = 0.01
-_XZ_VEL_PENALTY_WEIGHT = 0.20
-_JOINT_VEL_PENALTY_WEIGHT = 0.01
-_ACTION_RATE_PENALTY_WEIGHT = 0.03
+_XZ_VEL_PENALTY_WEIGHT = 1.00
+_JOINT_VEL_PENALTY_WEIGHT = 0.02
+_ACTION_RATE_PENALTY_WEIGHT = 0.05
 _TILT_PENALTY_WEIGHT = 0.25
-_FOOT_CONTACT_PENALTY_WEIGHT = 0.10
+_FOOT_CONTACT_PENALTY_WEIGHT = 2.00
+_FOOT_SLIP_PENALTY_WEIGHT = 0.00
+_FOOT_ANCHOR_PENALTY_WEIGHT = 5.00
+_FOOT_ANCHOR_DEADBAND = 0.005
+_FOOT_ANCHOR_CONTACT_ON_LOAD = 15.0
+_FOOT_ANCHOR_CONTACT_OFF_LOAD = 5.0
+_FOOT_ANCHOR_CONTACT_OFF_FRAMES = 5
+_BASE_DRIFT_PENALTY_WEIGHT = 2.00
+_BASE_DRIFT_DEADBAND = 0.01
+_STANDING_QUALITY_START_STEP = 100
 _MIN_FOOT_LOAD = 20.0
+_ANCHOR_LOAD_THRESHOLDS = (20.0, 15.0, 8.0, 5.0)
 
 # Zero action holds this home control pose.
 _HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
@@ -112,8 +122,17 @@ def standing_env_metadata() -> dict:
             "angular_velocity": _ANG_VEL_PENALTY_WEIGHT,
             "xz_velocity": _XZ_VEL_PENALTY_WEIGHT,
             "foot_contact": _FOOT_CONTACT_PENALTY_WEIGHT,
+            "foot_slip": _FOOT_SLIP_PENALTY_WEIGHT,
+            "foot_anchor": _FOOT_ANCHOR_PENALTY_WEIGHT,
+            "base_drift": _BASE_DRIFT_PENALTY_WEIGHT,
         },
         "minimum_foot_load": _MIN_FOOT_LOAD,
+        "foot_anchor_deadband": _FOOT_ANCHOR_DEADBAND,
+        "foot_anchor_contact_on_load": _FOOT_ANCHOR_CONTACT_ON_LOAD,
+        "foot_anchor_contact_off_load": _FOOT_ANCHOR_CONTACT_OFF_LOAD,
+        "foot_anchor_contact_off_frames": _FOOT_ANCHOR_CONTACT_OFF_FRAMES,
+        "base_drift_deadband": _BASE_DRIFT_DEADBAND,
+        "standing_quality_start_step": _STANDING_QUALITY_START_STEP,
         "solver": {
             "type": "BARZILAIBORWEIN",
             "max_iterations": 60,
@@ -183,6 +202,7 @@ class Go1Env(gym.Env):
         terrain: str = "flat",
         enable_motors: bool = True,
         friction_range: tuple[float, float] = (0.8, 0.8),
+        action_filter_tau: float | None = None,
     ):
         super().__init__()
         if terrain not in ("flat", "scm"):
@@ -192,12 +212,20 @@ class Go1Env(gym.Env):
         friction_min, friction_max = friction_range
         if friction_min <= 0 or friction_max <= 0 or friction_min > friction_max:
             raise ValueError("friction_range must satisfy 0 < min <= max")
+        if action_filter_tau is not None and action_filter_tau <= 0.0:
+            raise ValueError("action_filter_tau must be positive when provided")
 
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.terrain_type = terrain
         self.enable_motors = enable_motors
         self.friction_range = (float(friction_min), float(friction_max))
+        self.action_filter_tau = None if action_filter_tau is None else float(action_filter_tau)
+        self.action_filter_alpha = (
+            None
+            if self.action_filter_tau is None
+            else float(_TIME_STEP / (self.action_filter_tau + _TIME_STEP))
+        )
         self.ground_friction = None
         self.home_joint_angles = _HOME_JOINT_ANGLES.copy()
 
@@ -216,6 +244,20 @@ class Go1Env(gym.Env):
         self._joint_body_pairs = []
         self._vis = None
         self._prev_action = np.zeros(12, dtype=np.float32)
+        self._prev_raw_action = np.zeros(12, dtype=np.float32)
+        self._action_filter_initialized = False
+        self._reset_base_xz = np.zeros(2, dtype=np.float32)
+        self._base_anchor_xz = np.zeros(2, dtype=np.float32)
+        self._foot_anchor_xz = np.zeros((len(_FOOT_BODY_NAMES), 2), dtype=np.float32)
+        self._foot_anchor_active = np.zeros(len(_FOOT_BODY_NAMES), dtype=bool)
+        self._foot_anchor_off_frames = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
+        self._foot_anchor_reset_counts = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
+        self._foot_anchor_deactivate_counts = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
+        self._foot_load_below_counts = {
+            threshold: np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
+            for threshold in _ANCHOR_LOAD_THRESHOLDS
+        }
+        self._standing_reference_captured = False
         self.step_count = 0
 
         self._build_sim()
@@ -528,6 +570,136 @@ class Go1Env(gym.Env):
         }
         return -float(foot_contact_penalty), terms
 
+    def _foot_xz_positions(self) -> np.ndarray:
+        return np.array(
+            [
+                [float(foot.GetPos().x), float(foot.GetPos().z)]
+                for foot in self._feet
+            ],
+            dtype=np.float32,
+        )
+
+    def _capture_standing_reference(self, obs: np.ndarray, foot_loads: np.ndarray) -> None:
+        self._base_anchor_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        self._foot_anchor_xz = self._foot_xz_positions()
+        self._foot_anchor_active = foot_loads >= _FOOT_ANCHOR_CONTACT_ON_LOAD
+        self._foot_anchor_off_frames.fill(0)
+        self._foot_anchor_reset_counts += self._foot_anchor_active.astype(np.int32)
+        self._standing_reference_captured = True
+
+    def _anchor_diagnostic_terms(
+        self,
+        foot_loads: np.ndarray,
+        foot_displacements: np.ndarray,
+        foot_errors: np.ndarray,
+        base_xz: np.ndarray,
+    ) -> dict:
+        terms = {
+            "standing_reference_captured": float(self._standing_reference_captured),
+            "base_ref_x": float(self._base_anchor_xz[0]),
+            "base_ref_z": float(self._base_anchor_xz[1]),
+            "base_reset_x": float(self._reset_base_xz[0]),
+            "base_reset_z": float(self._reset_base_xz[1]),
+            "base_drift_from_reset": float(np.linalg.norm(base_xz - self._reset_base_xz)),
+            "foot_anchor_total_resets": float(np.sum(self._foot_anchor_reset_counts)),
+            "foot_anchor_total_deactivations": float(np.sum(self._foot_anchor_deactivate_counts)),
+        }
+        for index, name in enumerate(_FOOT_BODY_NAMES):
+            leg = name.split("_")[0]
+            terms[f"foot_anchor_active_{leg}"] = float(self._foot_anchor_active[index])
+            terms[f"foot_anchor_load_{leg}"] = float(foot_loads[index])
+            terms[f"foot_anchor_displacement_{leg}"] = float(foot_displacements[index])
+            terms[f"foot_anchor_error_{leg}"] = float(foot_errors[index])
+            terms[f"foot_anchor_reset_count_{leg}"] = float(self._foot_anchor_reset_counts[index])
+            terms[f"foot_anchor_deactivate_count_{leg}"] = float(self._foot_anchor_deactivate_counts[index])
+            terms[f"foot_anchor_off_frames_{leg}"] = float(self._foot_anchor_off_frames[index])
+            terms[f"foot_anchor_ref_x_{leg}"] = float(self._foot_anchor_xz[index, 0])
+            terms[f"foot_anchor_ref_z_{leg}"] = float(self._foot_anchor_xz[index, 1])
+            for threshold in _ANCHOR_LOAD_THRESHOLDS:
+                label = str(int(threshold))
+                terms[f"foot_load_below_{label}n_frames_{leg}"] = float(
+                    self._foot_load_below_counts[threshold][index]
+                )
+        return terms
+
+    def _settled_standing_quality_terms(self, obs: np.ndarray) -> tuple[float, dict]:
+        foot_loads = np.array(
+            [abs(float(foot.GetContactForce().y)) for foot in self._feet],
+            dtype=np.float32,
+        )
+        for threshold in _ANCHOR_LOAD_THRESHOLDS:
+            self._foot_load_below_counts[threshold] += (foot_loads < threshold).astype(np.int32)
+
+        base_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        foot_displacements = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.float32)
+        foot_errors = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.float32)
+
+        if self.step_count <= _STANDING_QUALITY_START_STEP:
+            terms = {
+                "foot_slip_error": 0.0,
+                "foot_slip_penalty": 0.0,
+                "base_drift": 0.0,
+                "base_drift_error": 0.0,
+                "base_drift_penalty": 0.0,
+                "foot_anchor_error": 0.0,
+                "foot_anchor_penalty": 0.0,
+                "foot_anchor_active_count": 0.0,
+                "foot_anchor_max_displacement": 0.0,
+            }
+            terms.update(self._anchor_diagnostic_terms(foot_loads, foot_displacements, foot_errors, base_xz))
+            return 0.0, terms
+
+        if not self._standing_reference_captured:
+            self._capture_standing_reference(obs, foot_loads)
+
+        foot_slip_error = 0.0
+        foot_anchor_error = 0.0
+        foot_anchor_max_displacement = 0.0
+        for index, (foot, load) in enumerate(zip(self._feet, foot_loads)):
+            pos = foot.GetPos()
+            foot_xz = np.array([float(pos.x), float(pos.z)], dtype=np.float32)
+            if self._foot_anchor_active[index]:
+                if load <= _FOOT_ANCHOR_CONTACT_OFF_LOAD:
+                    self._foot_anchor_off_frames[index] += 1
+                    if self._foot_anchor_off_frames[index] >= _FOOT_ANCHOR_CONTACT_OFF_FRAMES:
+                        self._foot_anchor_active[index] = False
+                        self._foot_anchor_deactivate_counts[index] += 1
+                else:
+                    self._foot_anchor_off_frames[index] = 0
+                displacement = float(np.linalg.norm(foot_xz - self._foot_anchor_xz[index]))
+                foot_displacements[index] = displacement
+                foot_anchor_max_displacement = max(foot_anchor_max_displacement, displacement)
+                error = max(0.0, displacement - _FOOT_ANCHOR_DEADBAND)
+                foot_errors[index] = error
+                foot_anchor_error += float(error ** 2)
+            elif load >= _FOOT_ANCHOR_CONTACT_ON_LOAD:
+                self._foot_anchor_xz[index] = foot_xz
+                self._foot_anchor_active[index] = True
+                self._foot_anchor_off_frames[index] = 0
+                self._foot_anchor_reset_counts[index] += 1
+
+        foot_slip_penalty = _FOOT_SLIP_PENALTY_WEIGHT * foot_slip_error
+        foot_anchor_penalty = _FOOT_ANCHOR_PENALTY_WEIGHT * foot_anchor_error
+
+        base_drift = float(np.linalg.norm(base_xz - self._base_anchor_xz))
+        base_drift_error = max(0.0, base_drift - _BASE_DRIFT_DEADBAND)
+        base_drift_penalty = _BASE_DRIFT_PENALTY_WEIGHT * float(base_drift_error ** 2)
+
+        terms = {
+            "foot_slip_error": float(foot_slip_error),
+            "foot_slip_penalty": float(foot_slip_penalty),
+            "base_drift": float(base_drift),
+            "base_drift_error": float(base_drift_error),
+            "base_drift_penalty": float(base_drift_penalty),
+            "foot_anchor_error": float(foot_anchor_error),
+            "foot_anchor_penalty": float(foot_anchor_penalty),
+            "foot_anchor_active_count": float(np.sum(self._foot_anchor_active)),
+            "foot_anchor_max_displacement": float(foot_anchor_max_displacement),
+        }
+        terms.update(self._anchor_diagnostic_terms(foot_loads, foot_displacements, foot_errors, base_xz))
+        penalty = foot_slip_penalty + foot_anchor_penalty + base_drift_penalty
+        return -float(penalty), terms
+
     def _motion_reward_terms(
         self,
         obs: np.ndarray,
@@ -591,6 +763,7 @@ class Go1Env(gym.Env):
             self._trunk_reward_terms(obs),
             self._pose_reward_terms(obs),
             self._foot_contact_terms(),
+            self._settled_standing_quality_terms(obs),
             self._motion_reward_terms(obs, action, action_delta),
         ):
             reward += delta
@@ -616,16 +789,38 @@ class Go1Env(gym.Env):
         super().reset(seed=seed)
         self._build_sim()
         self._prev_action = np.zeros(12, dtype=np.float32)
+        self._prev_raw_action = np.zeros(12, dtype=np.float32)
+        self._action_filter_initialized = False
+        self._foot_anchor_xz.fill(0.0)
+        self._foot_anchor_active.fill(False)
+        self._foot_anchor_off_frames.fill(0)
+        self._foot_anchor_reset_counts.fill(0)
+        self._foot_anchor_deactivate_counts.fill(0)
+        for counts in self._foot_load_below_counts.values():
+            counts.fill(0)
+        self._standing_reference_captured = False
         self.step_count = 0
-        return self._get_obs(), self._info()
+        obs = self._get_obs()
+        self._reset_base_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        self._base_anchor_xz = self._reset_base_xz.copy()
+        return obs, self._info()
 
     def step(self, action: np.ndarray):
         self.step_count += 1
 
-        clipped_action = np.clip(action, -1.0, 1.0).astype(np.float32)
-        action_delta = clipped_action - self._prev_action
+        raw_action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        if self.action_filter_alpha is None:
+            executed_action = raw_action.copy()
+        elif not self._action_filter_initialized:
+            executed_action = raw_action.copy()
+            self._action_filter_initialized = True
+        else:
+            executed_action = self._prev_action + self.action_filter_alpha * (raw_action - self._prev_action)
+            executed_action = executed_action.astype(np.float32)
+        action_delta = executed_action - self._prev_action
+        raw_action_delta = raw_action - self._prev_raw_action
         if self.enable_motors:
-            desired_targets = self.home_joint_angles + _ACTION_SCALE * clipped_action
+            desired_targets = self.home_joint_angles + _ACTION_SCALE * executed_action
             targets = np.clip(desired_targets, _JOINT_LOW, _JOINT_HIGH)
             for function, target in zip(self._motor_funcs, targets):
                 function.SetConstant(float(target))
@@ -640,15 +835,32 @@ class Go1Env(gym.Env):
 
         obs = self._get_obs()
         truncated = self.step_count >= self.max_steps
-        reward, reward_terms = self._standing_reward(obs, clipped_action, action_delta)
+        reward, reward_terms = self._standing_reward(obs, executed_action, action_delta)
+        reward_terms.update({
+            "action_filter_tau": 0.0 if self.action_filter_tau is None else float(self.action_filter_tau),
+            "action_filter_alpha": 0.0 if self.action_filter_alpha is None else float(self.action_filter_alpha),
+            "mean_abs_raw_action": float(np.mean(np.abs(raw_action))),
+            "max_abs_raw_action": float(np.max(np.abs(raw_action))),
+            "mean_abs_raw_action_delta": float(np.mean(np.abs(raw_action_delta))),
+            "max_abs_raw_action_delta": float(np.max(np.abs(raw_action_delta))),
+            "mean_abs_executed_action": float(np.mean(np.abs(executed_action))),
+            "max_abs_executed_action": float(np.max(np.abs(executed_action))),
+            "mean_abs_executed_action_delta": float(np.mean(np.abs(action_delta))),
+            "max_abs_executed_action_delta": float(np.max(np.abs(action_delta))),
+        })
         termination_reason = self._termination_reason(obs, reward_terms)
         terminated = termination_reason is not None
         if terminated:
             reward -= 5.0
-        self._prev_action = clipped_action.copy()
+        self._prev_raw_action = raw_action.copy()
+        self._prev_action = executed_action.copy()
 
         info = self._info()
         info["target_joint_angles"] = targets
+        info["raw_action"] = raw_action
+        info["executed_action"] = executed_action
+        info["raw_action_delta"] = raw_action_delta
+        info["executed_action_delta"] = action_delta
         info["reward_terms"] = reward_terms
         info["termination_reason"] = termination_reason
         return obs, reward, terminated, truncated, info

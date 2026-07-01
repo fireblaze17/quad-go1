@@ -1,6 +1,6 @@
 # Reproducibility
 
-This file gives the commands needed to run the current friction-only standing
+This file gives copy-paste commands for the current Chrono Go1 standing
 workflow.
 
 ## Platform
@@ -31,171 +31,154 @@ On Ankus's WSL machine, the explicit interpreter is:
 ## Static Checks
 
 ```bash
-python -m py_compile go1_env.py train_stand.py evaluate_stand.py diagnose_policy.py view_stand_policy.py run_regression.py compare_friction_slices.py nominal_load_sanity.py project_config.py
+python -m py_compile go1_env.py train_stand.py evaluate_stand.py diagnose_policy.py view_stand_policy.py run_regression.py compare_friction_slices.py friction_curriculum.py analyze_slip_timeline.py diagnostics.py project_config.py view_env.py chrono_go1_soil.py
 python train_stand.py --help
 python evaluate_stand.py --help
 python diagnose_policy.py --help
 python run_regression.py --help
 python compare_friction_slices.py --help
+python friction_curriculum.py --help
 ```
 
 Runtime reset-noise support should be absent:
 
 ```bash
-rg "reset-noise|reset_noise|RN-A|rn_a|RESET_NOISE" go1_env.py train_stand.py evaluate_stand.py diagnose_policy.py view_stand_policy.py run_regression.py compare_friction_slices.py nominal_load_sanity.py project_config.py
+rg "reset-noise|reset_noise|RN-A|rn_a|RESET_NOISE" go1_env.py train_stand.py evaluate_stand.py diagnose_policy.py view_stand_policy.py run_regression.py compare_friction_slices.py project_config.py friction_curriculum.py
 ```
 
 Expected result: no runtime-code hits.
 
-## Checkpoint Availability
-
-`runs/` is intentionally gitignored. Accepted checkpoints are local artifacts
-and are not stored in GitHub.
-
-Current kept checkpoints:
+## Current Baseline
 
 ```text
-runs/stand/final_model.zip
-runs/stand_base_v2/final_model.zip
-runs/stand_friction_a_07_09/final_model.zip
-runs/stand_friction_a_07_09_300k/final_model.zip
-runs/stand_friction_ab_065_095/final_model.zip
-runs/accepted_backups/
-runs/stand_reset_noise_a_slip0005_fullc_from50k_25k/  # archive only
+checkpoint:
+  runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+
+required control setup:
+  --action-filter-tau 0.05
 ```
 
-Keep each run's `args.json` and `env_constants.json` with `final_model.zip`.
-
-## Baseline Commands
-
-Zero-action environment check:
-
-```bash
-python view_env.py
-```
-
-Train fixed-friction standing:
-
-```bash
-python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
-```
-
-Evaluate:
-
-```bash
-python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
-```
-
-View:
-
-```bash
-python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
-```
-
-## PPO Training Knobs
-
-`train_stand.py` exposes optional PPO controls. Defaults preserve normal SB3
-behavior:
-
-```bash
---learning-rate
---clip-range
---target-kl
-```
-
-These work for both fresh training and `--load` continuation.
-
-## Archived AB Evaluation
-
-AB is the archived old baseline:
+The accepted fixed-0.8 confirmation was:
 
 ```text
-runs/stand_friction_ab_065_095/final_model.zip
+episodes: 30
+failure_type_counts: {'nominal': 30}
+survival_rate: 1.000
+settled_base_displacement_from_active_ref: 0.001637 m
+settled_total_contact_foot_slip_distance: 0.003516 m
+settled_total_contact_switches: 0
+settled_min_foot_load: 26.68 N
 ```
 
-Evaluate on C range:
+## View
 
 ```bash
-python evaluate_stand.py runs/stand_friction_ab_065_095/final_model.zip --terrain flat --friction-min 0.5 --friction-max 1.1 --episodes 100
+python view_stand_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-Run full regression:
+## Evaluate
 
 ```bash
-python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
+python evaluate_stand.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-Fixed-friction slices:
+## Diagnose
+
+One-episode timeline:
 
 ```bash
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate runs/stand_friction_ab_065_095/final_model.zip --name ab_self_slices --episodes 100
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_fixed08_timeline
+python analyze_slip_timeline.py diagnostics/current_baseline_fixed08_timeline/timeline.csv
 ```
 
-## Cleaner AB Retry
+Thirty-episode confirmation:
 
-The next planned training branch starts from friction A:
+```bash
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/current_baseline_fixed08_confirm30
+```
+
+Regression wrapper:
+
+```bash
+python run_regression.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --name current_baseline_fixed08_confirm30 --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
+```
+
+## Friction Bridge Checks
+
+Before randomized-friction training, run fixed-friction slices around the
+accepted baseline:
+
+```bash
+python friction_curriculum.py bridge-check
+```
+
+Equivalent manual pattern for one slice:
+
+```bash
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.7 --friction-max 0.7 --episodes 10 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/friction_bridge_filtered2k_mu_0p7
+```
+
+Compare against a candidate once one exists:
+
+```bash
+python compare_friction_slices.py --baseline runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --candidate CANDIDATE.zip --name candidate_vs_filtered2k_slices --episodes 10 --max-steps 5000 --mu 0.6 0.7 0.8 0.9 1.0 --action-filter-tau 0.05
+```
+
+## Training Continuation
+
+The accepted baseline was produced by a conservative 5k fine-tune with the
+action filter enabled. Future standing continuations should keep the filter:
 
 ```bash
 python train_stand.py \
+  --load runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip \
+  --save-dir runs/stand_friction_randomized_tau005_from_filtered2k \
   --terrain flat \
-  --friction-min 0.65 \
-  --friction-max 0.95 \
-  --load runs/stand_friction_a_07_09/final_model.zip \
-  --save-dir runs/stand_friction_ab_clean_retry \
-  --timesteps 300000 \
-  --seed 1 \
-  --checkpoint-freq 50000
+  --friction-min 0.6 \
+  --friction-max 1.0 \
+  --max-steps 5000 \
+  --timesteps 50000 \
+  --checkpoint-freq 10000 \
+  --learning-rate 0.00005 \
+  --clip-range 0.05 \
+  --target-kl 0.01 \
+  --action-filter-tau 0.05
 ```
 
-Regress each checkpoint before deciding whether to continue:
+Use shorter bridge tests before committing to long randomized-friction runs.
 
-```bash
-python run_regression.py runs/stand_friction_ab_clean_retry/checkpoints/stand_policy_50000_steps.zip --name ab_clean_retry_50k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_ab_clean_retry/checkpoints/stand_policy_100000_steps.zip --name ab_clean_retry_100k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_ab_clean_retry/checkpoints/stand_policy_150000_steps.zip --name ab_clean_retry_150k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_ab_clean_retry/checkpoints/stand_policy_200000_steps.zip --name ab_clean_retry_200k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_ab_clean_retry/checkpoints/stand_policy_250000_steps.zip --name ab_clean_retry_250k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python run_regression.py runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_300k_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-```
+## Checkpoint Availability
 
-Compare fixed-friction slices against archived AB:
+`runs/` is intentionally gitignored. Model artifacts live out of band. Keep
+each run's `args.json` and `env_constants.json` with its checkpoint.
 
-```bash
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_slices --episodes 100
-```
-
-View:
-
-```bash
-python view_stand_policy.py runs/stand_friction_ab_clean_retry/final_model.zip --terrain flat --friction-min 0.5 --friction-max 1.1
-```
-
-## Smoke Tests
-
-Small regression:
-
-```bash
-python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name smoke_ab_clean_friction --friction-min 0.5 --friction-max 1.1 --episodes 2 --max-steps 100
-```
-
-Small slice check:
-
-```bash
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate runs/stand_friction_ab_065_095/final_model.zip --name smoke_friction_slices --episodes 2 --max-steps 100 --mu 0.5 0.8
-```
-
-## Acceptance Rule
-
-A standing candidate is accepted only if it improves the archived AB behavior:
+Important local paths:
 
 ```text
-100/100 survival on C range
-better settled drift/slip metrics than AB
-healthy min foot load
-no persistent viewer sliding or tilt
-no non-foot collision load
-no obvious biased support mode
+runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip  # current baseline
+runs/stand_jitter_suppression_from_anchor5_10k/checkpoints/stand_policy_5000_steps.zip    # previous baseline
+runs/stand_fixed_clean_contact2_anchor5_from25k_10k/checkpoints/stand_policy_5000_steps.zip # archived support checkpoint
+runs/stand_friction_ab_065_095/final_model.zip                                           # archived pre-filter friction baseline
 ```
 
-Reset-noise work should resume only after this friction-only standing baseline
-is cleaner.
+## Smoke Test
+
+```bash
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/doc_refresh_smoke_tau005
+```
+
+## Nominal Load Reference
+
+The zero-action home-pose reference at fixed `mu=0.8`:
+
+```text
+FR: 27.17%
+FL: 27.55%
+RR: 22.46%
+RL: 22.82%
+front/rear: 54.7/45.3
+left/right: 50.4/49.6
+```
+
+Exact `25/25/25/25` foot loading is not the natural target for the current home
+pose. Left/right balance remains a valid diagnostic.

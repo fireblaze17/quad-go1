@@ -1,21 +1,28 @@
 # Flat Friction Curriculum
 
+> Historical note: this document records the pre-action-filter A/AB/C friction
+> curriculum. The current accepted baseline is the filtered fixed-friction
+> checkpoint documented in
+> [fixed_friction_standing.md](fixed_friction_standing.md). Use this file as
+> archived evidence, not as the current standing baseline.
+
 ## Summary
 
-The current standing v2 checkpoint is the fixed-friction anchor. The flat
-friction curriculum continues training from that anchor through three gradually
-wider friction ranges. Each stage writes to a new run directory so the accepted
-baseline is not overwritten.
+The current standing v2 checkpoint is the fixed-friction anchor. Historically,
+the flat friction curriculum continued training from that anchor through wider
+friction ranges. The active workflow now keeps only the base/A helper and uses
+manual, explicitly named experiments for any new AB retry.
 
 ```text
 runs/stand_base_v2
 -> runs/stand_friction_a_07_09
 -> runs/stand_friction_ab_065_095  (accepted as B-capable)
--> runs/stand_friction_c_05_11    (trained challenger; currently rejected)
+-> runs/stand_friction_c_05_11    (archived/deleted rejected challenger)
 ```
 
-Use `friction_curriculum.py` to prepare the base copy and print or run the exact
-commands.
+Use `friction_curriculum.py` to prepare the base copy, inspect Friction A, and
+print the current AB-retry command. It no longer exposes active B/C helper
+stages.
 
 All commands below assume the WSL conda environment is active:
 
@@ -24,9 +31,9 @@ conda activate chrono-go1
 ```
 
 Shared baseline paths and run directories are defined in `project_config.py`.
-`friction_curriculum.py` uses those constants so friction C loads the accepted
-B-capable AB checkpoint by default. Friction B is marked accepted via AB rather
-than retrained into the rejected B continuation folders.
+`friction_curriculum.py` uses those constants for the active base/A workflow.
+Historical B/C results remain documented here, but their deleted local run
+folders are not active helper targets.
 
 ## Stage 0: Preserve The Base
 
@@ -343,13 +350,9 @@ Interpretation:
 - Viewer inspection on `0.5-1.1` looked clean, so AB is the active C-capable
   reference until another model beats it.
 
-The first C continuation loaded from the accepted AB B-capable checkpoint:
-
-```bash
-python friction_curriculum.py train friction_c --run
-```
-
-It saved:
+The first C continuation loaded from the accepted AB B-capable checkpoint. That
+local run was later deleted after its failure signature was documented. It had
+saved:
 
 ```text
 runs/stand_friction_c_05_11/final_model.zip
@@ -417,7 +420,7 @@ Tradeoff:
   clearly improves an important acceptance metric without introducing worse
   contact behavior.
 
-## Direct Scratch C Comparison
+## Archived Direct Scratch C Comparison
 
 To compare curriculum against direct training fairly, scratch C uses the same
 total timestep budget as the accepted staged path through AB:
@@ -429,7 +432,9 @@ friction AB:    300k
 total:          700k
 ```
 
-Training commands:
+Historical training commands, kept as evidence of the old comparison design.
+These local run folders were deleted during the cleanup and are not active
+reproduction commands:
 
 ```bash
 python train_stand.py --terrain flat --friction-min 0.5 --friction-max 1.1 --save-dir runs/stand_friction_c_scratch_seed1_700k --timesteps 700000 --seed 1 --checkpoint-freq 100000
@@ -437,7 +442,7 @@ python train_stand.py --terrain flat --friction-min 0.5 --friction-max 1.1 --sav
 python train_stand.py --terrain flat --friction-min 0.5 --friction-max 1.1 --save-dir runs/stand_friction_c_scratch_seed3_700k --timesteps 700000 --seed 3 --checkpoint-freq 100000
 ```
 
-Regression commands:
+Historical regression commands, kept as evidence of the old comparison design:
 
 ```bash
 python run_regression.py runs/stand_friction_ab_065_095/final_model.zip --name ab_on_c_range --friction-min 0.5 --friction-max 1.1 --episodes 100
@@ -484,20 +489,8 @@ Interpretation:
 - A future model must beat AB on eval, diagnosis, and viewer behavior before it
   replaces the current baseline. A scratch seed with 100% survival is not enough.
 
-Evaluate C-from-AB:
-
-```bash
-python friction_curriculum.py eval friction_c --run
-```
-
-Held-out checks:
-
-```bash
-python friction_curriculum.py heldout friction_c --run
-```
-
-Held-out friction `0.4` and `1.2` are diagnostic only. They help show whether
-the learned policy is close to extrapolating beyond the training range.
+Held-out friction `0.4` and `1.2` were diagnostic only. They helped show
+whether the learned policy was close to extrapolating beyond the training range.
 
 ## Acceptance Criteria
 

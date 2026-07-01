@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-window-steps", type=int, default=250)
     parser.add_argument("--settled-window-steps", type=int, default=250)
     parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional environment action low-pass filter time constant in seconds.",
+    )
+    parser.add_argument(
         "--diagnostics-root",
         type=Path,
         default=Path("diagnostics"),
@@ -103,6 +109,33 @@ def _top_count(counts: dict[str, int] | None) -> dict[str, Any] | None:
     return {"key": key, "count": value}
 
 
+def _settled_load_pair_metrics(settled_window: dict[str, Any]) -> dict[str, float | None]:
+    shares = settled_window.get("foot_load_shares") or {}
+    required_legs = ("FL", "FR", "RL", "RR")
+    if not all(leg in shares for leg in required_legs):
+        return {
+            "settled_left_load_share": None,
+            "settled_right_load_share": None,
+            "settled_left_right_load_delta": None,
+            "settled_front_load_share": None,
+            "settled_rear_load_share": None,
+            "settled_front_rear_load_delta": None,
+        }
+
+    left = float(shares["FL"] + shares["RL"])
+    right = float(shares["FR"] + shares["RR"])
+    front = float(shares["FL"] + shares["FR"])
+    rear = float(shares["RL"] + shares["RR"])
+    return {
+        "settled_left_load_share": left,
+        "settled_right_load_share": right,
+        "settled_left_right_load_delta": abs(left - right),
+        "settled_front_load_share": front,
+        "settled_rear_load_share": rear,
+        "settled_front_rear_load_delta": abs(front - rear),
+    }
+
+
 def compact_summary(
     args: argparse.Namespace,
     eval_metrics: dict[str, Any],
@@ -111,6 +144,7 @@ def compact_summary(
     reward_terms = eval_metrics.get("mean_reward_terms", {})
     worst_case = diagnose_summary.get("worst_case", {})
     settled_window = diagnose_summary.get("window_means", {}).get("settled_window", {})
+    load_pair_metrics = _settled_load_pair_metrics(settled_window)
     return {
         "name": args.name,
         "policy": str(args.policy),
@@ -118,6 +152,7 @@ def compact_summary(
         "friction_range": [args.friction_min, args.friction_max],
         "episodes": args.episodes,
         "max_steps": args.max_steps,
+        "action_filter_tau": args.action_filter_tau,
         "eval": {
             "survival_rate": eval_metrics.get("survival_rate"),
             "mean_length": eval_metrics.get("mean_length"),
@@ -138,6 +173,7 @@ def compact_summary(
             "leg_symmetry_error": reward_terms.get("leg_symmetry_error"),
             "settled_mean_abs_xz_vel": settled_window.get("mean_abs_xz_vel"),
             "settled_base_displacement_from_reset": settled_window.get("base_displacement_from_reset"),
+            "settled_base_displacement_from_active_ref": settled_window.get("base_displacement_from_active_ref"),
             "settled_yaw_drift_from_reset": settled_window.get("yaw_drift_from_reset"),
             "settled_mean_trunk_x_up": settled_window.get("mean_trunk_x_up"),
             "settled_mean_trunk_y_up": settled_window.get("mean_trunk_y_up"),
@@ -148,6 +184,18 @@ def compact_summary(
             "settled_action_pair_delta": settled_window.get("action_pair_delta"),
             "settled_foot_load_shares": settled_window.get("foot_load_shares"),
             "settled_contact_duty": settled_window.get("contact_duty"),
+            "settled_max_foot_anchor_displacement": settled_window.get("max_foot_anchor_displacement"),
+            "settled_max_foot_anchor_error": settled_window.get("max_foot_anchor_error"),
+            "settled_total_foot_anchor_resets": settled_window.get("total_foot_anchor_resets"),
+            "settled_total_foot_anchor_deactivations": settled_window.get("total_foot_anchor_deactivations"),
+            "settled_foot_anchor_active_duty": settled_window.get("foot_anchor_active_duty"),
+            "settled_foot_anchor_reset_count": settled_window.get("foot_anchor_reset_count"),
+            "settled_foot_anchor_deactivate_count": settled_window.get("foot_anchor_deactivate_count"),
+            "settled_foot_load_below_20n_frames": settled_window.get("foot_load_below_20n_frames"),
+            "settled_foot_load_below_15n_frames": settled_window.get("foot_load_below_15n_frames"),
+            "settled_foot_load_below_8n_frames": settled_window.get("foot_load_below_8n_frames"),
+            "settled_foot_load_below_5n_frames": settled_window.get("foot_load_below_5n_frames"),
+            **load_pair_metrics,
         },
         "diagnosis": {
             "cause_counts": diagnose_summary.get("cause_counts"),
@@ -166,6 +214,10 @@ def compact_summary(
             "max_load_imbalance": worst_case.get("max_load_imbalance"),
             "max_foot_dxz": worst_case.get("max_foot_dxz"),
             "max_trunk_stance_center_error": worst_case.get("max_trunk_stance_center_error"),
+            "max_foot_anchor_displacement": worst_case.get("max_foot_anchor_displacement"),
+            "max_foot_anchor_error": worst_case.get("max_foot_anchor_error"),
+            "max_foot_anchor_resets": worst_case.get("max_foot_anchor_resets"),
+            "max_foot_anchor_deactivations": worst_case.get("max_foot_anchor_deactivations"),
             "max_nonfoot_load": worst_case.get("max_nonfoot_load"),
             "min_foot_load": worst_case.get("min_foot_load"),
             "min_upright_score": worst_case.get("min_upright_score"),
@@ -192,6 +244,8 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         "--max-steps",
         str(args.max_steps),
     ]
+    if args.action_filter_tau is not None:
+        eval_command.extend(["--action-filter-tau", str(args.action_filter_tau)])
     diagnose_command = [
         sys.executable,
         "diagnose_policy.py",
@@ -213,6 +267,8 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         "--out",
         str(out_dir),
     ]
+    if args.action_filter_tau is not None:
+        diagnose_command.extend(["--action-filter-tau", str(args.action_filter_tau)])
 
     print("Running evaluate_stand.py...")
     eval_stdout = _run_command(eval_command, out_dir / "evaluate_stdout.txt")
@@ -239,6 +295,7 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         f"upright={eval_block['min_upright_score']:.3f} "
         f"contact={eval_block['foot_contact_error']:.6f} "
         f"xz={eval_block['mean_abs_xz_vel']:.6f} "
+        f"settled_lr_delta={eval_block['settled_left_right_load_delta']:.6f} "
         f"cause={diagnosis_block['top_cause']}"
     )
     return summary

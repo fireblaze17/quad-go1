@@ -37,6 +37,12 @@ def parse_args():
     parser.add_argument("--friction-max", type=float, default=DEFAULT_VIEWER_FRICTION_RANGE[1])
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional environment action low-pass filter time constant in seconds.",
+    )
+    parser.add_argument(
         "--log-interval",
         type=int,
         default=100,
@@ -180,6 +186,7 @@ def main() -> None:
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
+        action_filter_tau=args.action_filter_tau,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
     obs, _ = env.reset()
@@ -191,7 +198,8 @@ def main() -> None:
         print_joint_debug(obs)
     print(
         f"viewing policy={args.policy} terrain={args.terrain} "
-        f"friction=({args.friction_min:.2f}, {args.friction_max:.2f})"
+        f"friction=({args.friction_min:.2f}, {args.friction_max:.2f}) "
+        f"action_filter_tau={args.action_filter_tau}"
     )
     step = 0
     episode = 1

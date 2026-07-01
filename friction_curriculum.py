@@ -1,4 +1,4 @@
-"""Helper commands for the flat-ground friction standing curriculum.
+"""Helper commands for the active flat-ground friction standing workflow.
 
 By default this script prints the next command instead of running it. Pass
 ``--run`` when you intentionally want to start a long training/evaluation job.
@@ -16,13 +16,11 @@ from pathlib import Path
 
 from project_config import (
     CURRENT_BASELINE_MODEL,
+    DEFAULT_ACTION_FILTER_TAU,
     FIXED_BASELINE_DIR,
     FIXED_BASELINE_MODEL,
     FRICTION_AB_DIR,
     FRICTION_A_DIR,
-    FRICTION_B_DIR,
-    FRICTION_B_CAPABLE_MODEL,
-    FRICTION_C_DIR,
     ORIGINAL_STAND_MODEL,
 )
 
@@ -38,13 +36,11 @@ class FrictionStage:
     load_model: Path
     friction_min: float
     friction_max: float
-    accepted_model: Path | None = None
     timesteps: int = 300_000
-    trainable: bool = True
 
     @property
     def model_path(self) -> Path:
-        return self.accepted_model or self.save_dir / "final_model.zip"
+        return self.save_dir / "final_model.zip"
 
 
 STAGES = {
@@ -54,22 +50,6 @@ STAGES = {
         load_model=BASE_MODEL,
         friction_min=0.7,
         friction_max=0.9,
-    ),
-    "friction_b": FrictionStage(
-        name="friction_b",
-        save_dir=FRICTION_B_DIR,
-        load_model=CURRENT_BASELINE_MODEL,
-        friction_min=0.6,
-        friction_max=1.0,
-        accepted_model=FRICTION_B_CAPABLE_MODEL,
-        trainable=False,
-    ),
-    "friction_c": FrictionStage(
-        name="friction_c",
-        save_dir=FRICTION_C_DIR,
-        load_model=FRICTION_B_CAPABLE_MODEL,
-        friction_min=0.5,
-        friction_max=1.1,
     ),
 }
 
@@ -83,11 +63,6 @@ def _path(path: Path) -> str:
 
 
 def train_command(stage: FrictionStage) -> list[str]:
-    if not stage.trainable:
-        raise ValueError(
-            f"{stage.name} is accepted via {stage.model_path}; "
-            "do not retrain this stage blindly."
-        )
     return [
         _python(),
         "train_stand.py",
@@ -103,6 +78,66 @@ def train_command(stage: FrictionStage) -> list[str]:
         _path(stage.save_dir),
         "--timesteps",
         str(stage.timesteps),
+    ]
+
+
+def fixed_clean_train_command() -> list[str]:
+    return friction_bridge_commands()[0]
+
+
+def friction_bridge_commands() -> list[list[str]]:
+    commands = []
+    for mu in (0.6, 0.7, 0.8, 0.9, 1.0):
+        commands.append([
+            _python(),
+            "diagnose_policy.py",
+            _path(CURRENT_BASELINE_MODEL),
+            "--terrain",
+            "flat",
+            "--friction-min",
+            str(mu),
+            "--friction-max",
+            str(mu),
+            "--episodes",
+            "10",
+            "--max-steps",
+            "5000",
+            "--action-filter-tau",
+            str(DEFAULT_ACTION_FILTER_TAU),
+            "--out",
+            f"diagnostics/friction_bridge_filtered2k_mu_{mu:.1f}".replace(".", "p"),
+        ])
+    return commands
+
+
+def friction_randomization_train_command() -> list[str]:
+    return [
+        _python(),
+        "train_stand.py",
+        "--terrain",
+        "flat",
+        "--friction-min",
+        "0.6",
+        "--friction-max",
+        "1.0",
+        "--load",
+        _path(CURRENT_BASELINE_MODEL),
+        "--save-dir",
+        "runs/stand_friction_randomized_tau005_from_filtered2k",
+        "--timesteps",
+        "50000",
+        "--seed",
+        "1",
+        "--checkpoint-freq",
+        "10000",
+        "--learning-rate",
+        "0.00005",
+        "--clip-range",
+        "0.05",
+        "--target-kl",
+        "0.01",
+        "--action-filter-tau",
+        str(DEFAULT_ACTION_FILTER_TAU),
     ]
 
 
@@ -191,13 +226,12 @@ def check_pychrono_parser_access() -> None:
 
 
 def print_status() -> None:
-    paths = [BASE_MODEL, FRICTION_A_DIR / "final_model.zip", FRICTION_AB_DIR / "final_model.zip"]
-    paths.extend(
-        stage.model_path
-        for stage in STAGES.values()
-        if stage.model_path not in paths
-    )
-    for path in paths:
+    for path in (
+        CURRENT_BASELINE_MODEL,
+        BASE_MODEL,
+        FRICTION_A_DIR / "final_model.zip",
+        FRICTION_AB_DIR / "final_model.zip",
+    ):
         state = "exists" if path.exists() else "missing"
         print(f"{state:<7} {path}")
 
@@ -206,13 +240,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=["prepare-base", "train", "eval", "view", "heldout", "status", "all-commands"],
+        choices=[
+            "prepare-base",
+            "train",
+            "eval",
+            "view",
+            "status",
+            "all-commands",
+            "fixed-clean",
+            "bridge-check",
+            "friction-randomization",
+        ],
     )
     parser.add_argument(
         "stage",
         nargs="?",
         choices=list(STAGES),
-        help="Curriculum stage for train/eval/view/heldout.",
+        help="Curriculum stage for train/eval/view.",
     )
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--run", action="store_true", help="Run the command instead of only printing it.")
@@ -230,18 +274,35 @@ def main() -> None:
         print_status()
         return
 
+    if args.action == "fixed-clean":
+        print("# fixed-clean is retained as a compatibility alias for bridge-check.")
+        for command in friction_bridge_commands():
+            run_or_print(command, args.run)
+        return
+
+    if args.action == "bridge-check":
+        for command in friction_bridge_commands():
+            run_or_print(command, args.run)
+        return
+
+    if args.action == "friction-randomization":
+        run_or_print(friction_randomization_train_command(), args.run)
+        return
+
     if args.action == "all-commands":
-        print("# Prepare base")
+        print("# Current filtered-baseline bridge checks")
+        for command in friction_bridge_commands():
+            print_command(command)
+        print("\n# First friction-randomization continuation after bridge checks pass")
+        print_command(friction_randomization_train_command())
+        print("\n# Archived pre-filter friction-A helper commands")
         print_command([_python(), "friction_curriculum.py", "prepare-base"])
         for stage in STAGES.values():
-            print(f"\n# Train {stage.name}")
-            if stage.trainable:
-                print_command(train_command(stage))
-            else:
-                print(f"# {stage.name} is accepted via {stage.model_path}; no train command.")
-            print(f"# Evaluate {stage.name}")
+            print(f"# Archived train {stage.name}")
+            print_command(train_command(stage))
+            print(f"# Archived evaluate {stage.name}")
             print_command(eval_command(stage.model_path, stage.friction_min, stage.friction_max, 10))
-            print(f"# View {stage.name}")
+            print(f"# Archived view {stage.name}")
             print_command(view_command(stage))
         return
 
@@ -250,12 +311,6 @@ def main() -> None:
 
     stage = STAGES[args.stage]
     if args.action == "train":
-        if not stage.trainable:
-            raise SystemExit(
-                f"{stage.name} is accepted via {stage.model_path}; "
-                "skip retraining and use eval/view, or run train_stand.py manually "
-                "with a new experiment folder if you intentionally want a new test."
-            )
         run_or_print(train_command(stage), args.run)
     elif args.action == "eval":
         run_or_print(
@@ -264,11 +319,6 @@ def main() -> None:
         )
     elif args.action == "view":
         run_or_print(view_command(stage), args.run)
-    elif args.action == "heldout":
-        if stage.name != "friction_c":
-            raise SystemExit("heldout checks are only defined for friction_c")
-        for friction in (0.4, 1.2):
-            run_or_print(eval_command(stage.model_path, friction, friction, 5), args.run)
 
 
 if __name__ == "__main__":

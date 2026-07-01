@@ -43,12 +43,14 @@ def foot_debug_stats(
     speeds = []
     heights = []
     contact_loads = []
+    positions = []
 
     for body, (reset_x, reset_z) in zip(feet, reset_xz):
         pos = body.GetPos()
         vel = body.GetPosDt()
         dx = float(pos.x) - reset_x
         dz = float(pos.z) - reset_z
+        positions.append((float(pos.x), float(pos.z)))
         displacements.append((dx * dx + dz * dz) ** 0.5)
         speeds.append((float(vel.x) ** 2 + float(vel.z) ** 2) ** 0.5)
         heights.append(float(pos.y))
@@ -72,6 +74,7 @@ def foot_debug_stats(
         "foot_load_shares": load_shares,
         "foot_load_imbalance": load_imbalance,
         "foot_displacements": displacements,
+        "foot_positions": positions,
         "foot_speeds": speeds,
     }
 

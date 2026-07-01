@@ -1,199 +1,168 @@
 # Quad Go1
 
-Project Chrono robotics simulation and ML project for a Unitree Go1-style
-quadruped.
+Project Chrono robotics simulation and reinforcement-learning project for a
+Unitree Go1-style quadruped.
 
 ## Goal
 
-1. Build a stable Go1 simulation in Chrono.
+1. Build a reproducible Go1 simulation in Chrono.
 2. Wrap it as a Gymnasium environment.
-3. Train clean standing on flat randomized friction.
-4. Transfer to Chrono SCM deformable terrain.
-5. Collect rollouts, train a world model, and add hierarchical skill selection.
-
-## Docs Map
-
-- [README.md](README.md) - current project overview
-- [docs/reproducibility.md](docs/reproducibility.md) - exact commands and checks
-- [docs/training_roadmap.md](docs/training_roadmap.md) - reward decisions and next work
-- [docs/experiments/friction_curriculum.md](docs/experiments/friction_curriculum.md) - friction A/B/C history
-- [docs/experiments/standing_v2.md](docs/experiments/standing_v2.md) - fixed-friction model card
-- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision/contact debugging trail
-- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono import, solver, and contact notes
+3. Train clean standing on flat terrain.
+4. Expand the accepted standing controller to randomized friction.
+5. Transfer to Chrono SCM deformable terrain and later hierarchical skills.
 
 ## Current Status
 
 ```text
-Stage: randomized-friction standing cleanup
+Stage: fixed-friction standing accepted; friction bridge checks next
 
-Archived old baseline:
-  checkpoint: runs/stand_friction_ab_065_095/final_model.zip
-  trained on: friction 0.65-0.95
-  accepted on old criteria: B range 0.6-1.0, stress C range 0.5-1.1
+Current baseline checkpoint:
+  runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
 
-Current interpretation:
-  AB is still the best archived standing checkpoint, but it is not final-clean.
-  New settled-window diagnostics showed drift/slip even before reset-noise work.
-  Reset-noise experiments are paused until randomized-friction standing is cleaner.
+Required control setup:
+  action_filter_tau = 0.05
 
-Active code path:
-  friction-only standing
-  no reset-noise runtime API
-  old AB-era reward restored
-  diagnostic tooling kept for settled-window and friction-slice checks
-
-Next work:
-  restart before AB, likely from runs/stand_friction_a_07_09/final_model.zip
-  train a cleaner AB replacement on randomized friction
-  use settled diagnostics, fixed-friction slices, and viewer checks before acceptance
+Fixed mu=0.8 confirmation:
+  episodes: 30/30 nominal
+  active-reference drift: 0.001637 m
+  settled total foot slip: 0.003516 m
+  settled contact switches: 0
+  settled min foot load: 26.68 N
 ```
 
-## Kept Checkpoints
+The accepted baseline is the checkpoint plus the environment action filter.
+The checkpoint alone is not the full control recipe.
 
-`runs/` is gitignored and model artifacts live out of band.
+## Docs Map
+
+- [docs/reproducibility.md](docs/reproducibility.md) - copy-paste commands
+- [docs/training_roadmap.md](docs/training_roadmap.md) - current decisions and next work
+- [docs/experiments/fixed_friction_standing.md](docs/experiments/fixed_friction_standing.md) - fixed-standing ADR log
+- [docs/experiments/friction_curriculum.md](docs/experiments/friction_curriculum.md) - archived pre-filter friction history
+- [docs/experiments/standing_v2.md](docs/experiments/standing_v2.md) - historical fixed-friction model card
+- [docs/collision_debug_log.md](docs/collision_debug_log.md) - collision/contact ADRs
+- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) - Chrono import, solver, and contact ADRs
+- [HANDOFF.md](HANDOFF.md) - freshest working-state brief
+
+## Active Reward And Control
+
+The active standing reward in `go1_env.py` is:
 
 ```text
-runs/stand/final_model.zip
-runs/stand_base_v2/final_model.zip
-runs/stand_friction_a_07_09/final_model.zip
-runs/stand_friction_a_07_09_300k/final_model.zip
-runs/stand_friction_ab_065_095/final_model.zip
-runs/accepted_backups/
-runs/stand_reset_noise_a_slip0005_fullc_from50k_25k/  # archived reference only
+reward =
+  alive_bonus
++ upright_reward
+- tilt_penalty
+- pose_penalty
+- control_penalty
+- joint_velocity_penalty
+- action_rate_penalty
+- angular_velocity_penalty
+- raw X/Z velocity penalty
+- missing-foot-load contact penalty
+- planted-foot anchor penalty after step 100
+- base drift penalty after step 100
 ```
 
-The reset-noise `slip25` run is kept only as historical evidence. The cleaned
-runtime does not support reset-noise evaluation right now.
-
-## Current Reward
-
-The active environment is back to the old friction-era reward shape:
+Current important settings:
 
 ```text
-alive_bonus:      1.00
-upright:          0.15
-pose:             0.30
-control:          0.03
-joint_velocity:   0.01
-action_rate:      0.03
-tilt:             0.25
-angular_velocity: 0.01
-xz_velocity:      0.20
-foot_contact:     0.10
+alive_bonus:             1.00
+upright:                 0.15
+pose:                    0.30
+control:                 0.03
+angular_velocity:        0.01
+xz_velocity:             1.00
+joint_velocity:          0.02
+action_rate:             0.05
+tilt:                    0.25
+foot_contact:            2.00
+foot_slip:               0.00
+foot_anchor:             5.00, 0.005 m deadband
+base_drift:              2.00, 0.01 m deadband
+action_filter_tau:       0.05 when running accepted baseline
 ```
 
-Removed from active reward/code: reset-noise profiles, clean-standing bonus,
-direct load-balance reward experiments, foot-slip reward experiments,
-contact-switch reward pressure, and reset-noise comparison modes.
+The action filter is a control-interface filter, not a reward term. The policy
+outputs raw actions; the environment low-pass filters them before setting motor
+targets. Stance-shape, normalized X/Z velocity, base drift `10.0`, and global
+foot-slip reward `0.05` are rejected experiments, not active baseline behavior.
 
 ## Project Shape
 
 ```text
-go1_env.py                 Chrono Gymnasium environment
-view_env.py                zero-action/live test harness
+go1_env.py                 Chrono Gymnasium environment and reward
 train_stand.py             PPO standing-policy training
 evaluate_stand.py          headless policy evaluation
-view_stand_policy.py       trained-policy viewer
-friction_curriculum.py     flat randomized-friction curriculum helper
-project_config.py          shared paths and runtime defaults
-diagnose_policy.py         headless settled-window diagnosis
-run_regression.py          eval + diagnosis regression runner
-compare_friction_slices.py fixed-friction AB-vs-candidate comparison
-nominal_load_sanity.py     zero-action/home-pose load sanity check
-models/go1/go1_chrono.urdf Chrono-specific Go1 URDF
+diagnose_policy.py         settled-window and timeline diagnostics
+analyze_slip_timeline.py   foot-slip timeline classifier
+run_regression.py          evaluation + diagnosis wrapper
+compare_friction_slices.py fixed-friction slice comparison
+view_stand_policy.py       trained-policy Irrlicht viewer
+view_env.py                zero-action/live environment viewer
+friction_curriculum.py     helper commands for bridge/friction work
+project_config.py          shared paths and defaults
 chrono_go1_soil.py         SCM deformable terrain milestone
-mujoco/                    MuJoCo baseline, historical reference only
-docs/                      decision logs and roadmap
+mujoco/                    historical MuJoCo reference
+docs/                      decision logs and reproducibility notes
 ```
 
 ## Quick Start
 
-The active development environment is WSL Ubuntu with the `chrono-go1` conda
-environment:
+Activate the WSL conda environment:
 
 ```bash
 conda activate chrono-go1
 ```
 
-After activation, use `python`.
+View the accepted baseline:
 
 ```bash
-# View zero-action environment
-python view_env.py
-
-# Train fixed-friction standing
-python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
-
-# Evaluate a policy
-python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
-
-# View a policy
-python view_stand_policy.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8
+python view_stand_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-## Current Comparison Workflow
-
-Survival is required, but it is not enough. A candidate must also improve
-settled drift, contact quality, foot load, and viewer behavior.
+Run a fixed-0.8 diagnostic:
 
 ```bash
-# One friction range: evaluation + diagnosis
-python run_regression.py POLICY.zip --name RUN_NAME --friction-min 0.5 --friction-max 1.1 --episodes 100
-
-# Fixed-friction slices against archived AB
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate POLICY.zip --name RUN_NAME_slices --episodes 100
-
-# Nominal home-pose load sanity
-python nominal_load_sanity.py --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
-
-# Viewer check
-python view_stand_policy.py POLICY.zip --terrain flat --friction-min 0.5 --friction-max 1.1
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/current_baseline_fixed08_smoke
 ```
 
-## Next Training Direction
-
-The next branch should rebuild a cleaner randomized-friction AB-style policy
-before returning to reset-noise:
+Run a compact regression:
 
 ```bash
-python train_stand.py \
-  --terrain flat \
-  --friction-min 0.65 \
-  --friction-max 0.95 \
-  --load runs/stand_friction_a_07_09/final_model.zip \
-  --save-dir runs/stand_friction_ab_clean_retry \
-  --timesteps 300000 \
-  --seed 1 \
-  --checkpoint-freq 50000
+python run_regression.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --name current_baseline_fixed08 --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-Then compare it against archived AB:
+## Next Work
+
+Before randomized-friction training, run bridge checks at fixed friction values:
 
 ```bash
-python run_regression.py runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_on_c --friction-min 0.5 --friction-max 1.1 --episodes 100
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate runs/stand_friction_ab_clean_retry/final_model.zip --name ab_clean_retry_slices --episodes 100
+python friction_curriculum.py bridge-check
 ```
 
-## Metrics Glossary
+If the bridge checks pass, continue from the accepted filtered baseline with
+fixed `action_filter_tau=0.05`:
+
+```bash
+python friction_curriculum.py friction-randomization
+```
+
+Acceptance for the next phase still requires settled-window diagnostics, slip
+analysis when needed, and viewer checks. Survival alone is not enough.
+
+## Nominal Load Reference
+
+The zero-action home-pose load reference at fixed `mu=0.8` is:
 
 ```text
-survival_rate              fraction of episodes reaching max steps
-mean_abs_xz_vel            average horizontal trunk velocity magnitude
-settled_mean_abs_xz_vel    same metric in the final settled window
-base_xz_displacement       final/settled trunk drift from reset position
-foot_contact_error         missing-load/contact quality penalty signal
-min_foot_load              lowest per-foot vertical contact load
-dominant_loaded_leg        foot carrying most load most often
-least_loaded_leg           foot carrying least load most often
-contact_switch_count       per-foot contact toggles in a window
-foot_slip_distance         contact-conditioned tangential foot motion
+FR: 27.17%
+FL: 27.55%
+RR: 22.46%
+RL: 22.82%
+front/rear: 54.7/45.3
+left/right: 50.4/49.6
 ```
 
-## Notes
-
-- AB passed the old B/C survival and visual checks, but settled diagnostics now
-  show it still creeps/slips enough that it should not be treated as final.
-- Reset-noise work exposed the problem more clearly; it did not create the root
-  issue.
-- The codebase is intentionally back to friction-only training so the standing
-  controller can be fixed at the source before adding robustness knobs again.
+Exact `25/25/25/25` loading is not the natural target for this home pose.
+Left/right balance remains a useful diagnostic.

@@ -1,41 +1,53 @@
 # Training Roadmap
 
-This file records the current rational path through the standing experiments.
-Git history has the exact old code states; this document explains what we now
-believe and what should happen next.
+This document records the current decision path for Chrono Go1 standing. Git
+history and diagnostics artifacts contain exact old code states; this file
+summarizes what is currently believed and what should happen next.
 
 ## Current Direction
 
-The project is back in randomized-friction standing cleanup.
-
-AB remains the best archived checkpoint:
+Fixed-friction flat standing at `mu=0.8` is accepted with the filtered-control
+baseline:
 
 ```text
-runs/stand_friction_ab_065_095/final_model.zip
+runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+action_filter_tau = 0.05
 ```
 
-But AB is no longer considered final-clean standing. It passed the older
-criteria on B/C friction ranges, then later settled-window diagnostics showed
-that drift/slip is already present before reset-noise is introduced. Therefore
-reset-noise training is paused. The next useful work is to rebuild a cleaner
-AB-style policy from the friction curriculum.
+The accepted 30-episode, 5000-step fixed-0.8 confirmation:
 
-## Active Runtime Reward
+```text
+failure_type_counts: {'nominal': 30}
+survival_rate: 1.000
+active-reference drift: 0.001637 m
+settled total contact foot slip: 0.003516 m
+settled total contact switches: 0
+settled min foot load: 26.68 N
+```
 
-The active code is restored to the AB/friction-era reward behavior:
+Next work is not another fixed-0.8 reward change. The next step is bridge
+testing at nearby fixed frictions, then randomized-friction fine-tuning if the
+bridge checks remain clean.
+
+## Active Reward And Control
+
+The active reward keeps the accepted standing shape, plus settled foot-anchor
+and base-reference diagnostics:
 
 ```python
 reward = (
     alive_bonus
     + upright_reward
+    - tilt_penalty
     - pose_penalty
     - control_penalty
     - joint_vel_penalty
     - action_rate_penalty
-    - tilt_penalty
     - ang_vel_penalty
     - xz_vel_penalty
     - foot_contact_penalty
+    - foot_anchor_penalty
+    - base_drift_penalty
 )
 ```
 
@@ -45,156 +57,109 @@ Current weights:
 alive_bonus             1.00
 upright_reward          0.15 * upright_score
 pose_penalty            0.30 * mean(joint_error^2)
-control_penalty         0.03 * mean(action^2)
-joint_vel_penalty       0.01 * mean(joint_velocity^2)
-action_rate_penalty     0.03 * mean(action_delta^2)
+control_penalty         0.03 * mean(executed_action^2)
+joint_vel_penalty       0.02 * mean(joint_velocity^2)
+action_rate_penalty     0.05 * mean(executed_action_delta^2)
 tilt_penalty            0.25 * (trunk_x_up^2 + trunk_y_up^2)
 angular_vel_penalty     0.01 * mean(trunk_angular_velocity^2)
-xz_vel_penalty          0.20 * mean([vx, vz]^2)
-foot_contact_penalty    0.10 * mean(missing_foot_load^2)
+xz_vel_penalty          1.00 * mean([vx, vz]^2)
+foot_contact_penalty    2.00 * mean(missing_foot_load^2)
+foot_slip_penalty       0.00
+foot_anchor_penalty     5.00 * planted anchor error after step 100
+base_drift_penalty      2.00 * max(0, active_ref_drift - 0.01)^2 after step 100
 ```
 
-Removed from active runtime:
+The action filter is part of the control interface, not a reward term:
+
+```python
+alpha = dt / (tau + dt)
+executed_action = previous_executed_action + alpha * (raw_action - previous_executed_action)
+```
+
+For the accepted baseline, `tau=0.05` and `dt=0.002`, so `alpha=0.038462`.
+
+## Decision History
+
+The detailed ADR-style log is in
+[experiments/fixed_friction_standing.md](experiments/fixed_friction_standing.md).
+The short version:
 
 ```text
-reset-noise profiles
-clean-standing bonus
-direct load-balance reward experiments
-max-share and left/right load penalties
-foot-slip reward experiments
-contact-switch reward pressure
-reset-noise clean/noisy comparison mode
+old fixed/AB baselines              archived; survival was not clean standing
+anchor5 support checkpoint          useful, but failed long-hold creep
+base drift weight 10.0              rejected
+freeze-action diagnostic            accepted; identified action jitter
+jitter-suppression fine-tune         accepted as intermediate baseline
+normalized foot slip 0.05           rejected
+stance-shape 0.05 and 0.005         rejected
+eval-only action filter sweep        accepted; tau=0.05 smallest clean tau
+filtered fine-tune                   accepted; 2k checkpoint promoted
 ```
 
-Generic PPO knobs remain in `train_stand.py` because they are useful outside
-reset noise:
-
-```text
---learning-rate
---clip-range
---target-kl
-```
-
-## Why AB Passed Before
-
-AB was trained as a continuation from friction A:
-
-```text
-base fixed friction -> friction A 0.7-0.9 -> AB 0.65-0.95
-```
-
-It passed the older checks:
-
-```text
-100/100 survival on C range 0.5-1.1
-full 1000-step episodes
-high upright score
-viewer looked good enough
-no non-foot collision exploit
-better than C-from-AB and scratch-C challengers
-```
-
-That made AB the correct old baseline. The mistake would be treating survival
-as final proof of clean standing.
-
-## Why AB Must Be Redone
-
-New diagnostics added after the reset-noise phase split behavior into full,
-early, and settled windows. Those diagnostics showed that the standing problem
-is not only "stay alive." It is also:
-
-```text
-stay upright
-stay in place
-keep all feet planted cleanly
-avoid creeping/slipping
-avoid biased support patterns
-```
-
-AB is still useful as an archived comparison point, but it already has enough
-settled drift/slip that reset-noise training starts from a shaky foundation.
-Reset noise made the failure obvious; it did not create the root issue.
-
-## Reset-Noise Archive
-
-Reset-noise runtime support and reset-noise reward experiments are intentionally
-removed from active code. The main lesson is kept here:
-
-```text
-reward shaping during reset-noise training often improved one metric while
-worsening another, especially drift, contact switching, and load bias.
-```
-
-The reset-noise branch produced useful diagnostics and one archived reference
-run:
-
-```text
-runs/stand_reset_noise_a_slip0005_fullc_from50k_25k/
-```
-
-That run is not an active baseline. It is kept only as evidence for what was
-tried.
+Important negative lesson: stronger stationarity rewards were less effective
+than fixing the control interface. The policy already knew a quiet standing
+action; the failure was persistent high-frequency action updates reaching the
+contacts.
 
 ## Current Diagnostic Workflow
 
-Use settled-window diagnostics before accepting a standing candidate:
+Use filtered-control diagnostics for all current baseline checks:
 
 ```bash
-python run_regression.py POLICY.zip --name RUN_NAME --friction-min 0.5 --friction-max 1.1 --episodes 100
-python compare_friction_slices.py --baseline runs/stand_friction_ab_065_095/final_model.zip --candidate POLICY.zip --name RUN_NAME_slices --episodes 100
-python nominal_load_sanity.py --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
-python view_stand_policy.py POLICY.zip --terrain flat --friction-min 0.5 --friction-max 1.1
+python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_fixed08_timeline
+python analyze_slip_timeline.py diagnostics/current_baseline_fixed08_timeline/timeline.csv
+python run_regression.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --name current_baseline_fixed08_confirm30 --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-Important acceptance signals:
+Acceptance signals:
 
 ```text
 survival_rate
-mean_abs_xz_vel
-settled_mean_abs_xz_vel
-base_xz_displacement
-signed trunk_x_up/trunk_y_up
-min_foot_load
-foot_contact_error
-foot load shares
-contact switches
-contact-conditioned slip distance
-viewer drift/tilt/sliding
+failure_type_counts
+settled_base_displacement_from_active_ref
+settled_total_contact_foot_slip_distance
+settled_total_contact_switches
+settled_min_foot_load
+settled foot-load shares
+foot-anchor displacement/reset/deactivation diagnostics
+viewer drift/slip/contact behavior
 ```
 
 ## Next Experiment
 
-Start before AB and train a cleaner randomized-friction replacement:
+Run fixed-friction bridge checks before randomized training:
 
 ```bash
-python train_stand.py \
-  --terrain flat \
-  --friction-min 0.65 \
-  --friction-max 0.95 \
-  --load runs/stand_friction_a_07_09/final_model.zip \
-  --save-dir runs/stand_friction_ab_clean_retry \
-  --timesteps 300000 \
-  --seed 1 \
-  --checkpoint-freq 50000
+python friction_curriculum.py bridge-check
 ```
 
-Evaluate checkpoints, not only the final model. The best standing checkpoint may
-appear before the end of training.
-
-## Acceptance Rule
-
-A new AB replacement must beat archived AB on settled quality, not merely match
-survival:
+Recommended bridge acceptance:
 
 ```text
-100/100 survival on C range
-lower settled drift than AB
-lower or comparable contact error
-healthy min foot load
-no persistent viewer sliding
-no obvious biased support pattern
-no non-foot collision load
+each tested mu reaches max_steps
+active-reference drift <= 0.03 m
+settled contact switches = 0 preferred
+settled min foot load near or above 20 N
+no repeated foot_slip / one_foot_creep / all_feet_creep classification
+viewer shows no obvious sliding
 ```
 
-Only after this randomized-friction standing policy is clean should reset-noise
-support be reintroduced.
+If bridge checks pass, continue with conservative PPO from the filtered
+baseline:
+
+```bash
+python friction_curriculum.py friction-randomization
+```
+
+Keep `--action-filter-tau 0.05` during continuation. Treat it as part of the
+actuator/control stack unless an explicit ablation is being run.
+
+## Historical Notes
+
+- `docs/experiments/friction_curriculum.md` records the old A/AB/C curriculum.
+  Those policies are archived pre-filter evidence, not current baselines.
+- `docs/experiments/standing_v2.md` is a historical fixed-friction model card.
+- Reset-noise experiments remain archived evidence only. They should not resume
+  until filtered standing is tested across friction.
+- `nominal_load_sanity.py` was removed after its useful load reference was
+  documented.

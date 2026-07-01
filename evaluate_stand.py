@@ -7,7 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 from go1_env import Go1Env
-from project_config import ORIGINAL_STAND_MODEL, SB3_DEVICE
+from project_config import CURRENT_BASELINE_MODEL, SB3_DEVICE
 
 
 def parse_args():
@@ -16,7 +16,7 @@ def parse_args():
         "policy",
         type=Path,
         nargs="?",
-        default=ORIGINAL_STAND_MODEL,
+        default=CURRENT_BASELINE_MODEL,
         help="Path to a Stable-Baselines3 policy zip.",
     )
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
@@ -24,6 +24,12 @@ def parse_args():
     parser.add_argument("--friction-max", type=float, default=0.8)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional environment action low-pass filter time constant in seconds.",
+    )
     return parser.parse_args()
 
 
@@ -40,6 +46,7 @@ def main() -> None:
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
+        action_filter_tau=args.action_filter_tau,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
 

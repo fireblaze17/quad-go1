@@ -24,6 +24,12 @@ def parse_args():
     parser.add_argument("--load", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional environment action low-pass filter time constant in seconds.",
+    )
+    parser.add_argument(
         "--learning-rate",
         type=float,
         default=3e-4,
@@ -56,6 +62,7 @@ def make_env(args):
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
+        action_filter_tau=args.action_filter_tau,
     )
     return Monitor(env)
 

@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-window-steps", type=int, default=250)
     parser.add_argument("--settled-window-steps", type=int, default=250)
     parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional environment action low-pass filter time constant in seconds.",
+    )
+    parser.add_argument(
         "--mu",
         type=float,
         nargs="*",
@@ -102,6 +108,8 @@ def main() -> None:
                 "--diagnostics-root",
                 str(args.diagnostics_root),
             ]
+            if args.action_filter_tau is not None:
+                command.extend(["--action-filter-tau", str(args.action_filter_tau)])
             _run(command)
             summary_dir = args.diagnostics_root / run_name
             rows.append(_row(label, mu, _load_summary(summary_dir / "regression_summary.json"), "friction_only"))

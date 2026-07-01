@@ -10,14 +10,15 @@ FIXED_BASELINE_DIR = Path("runs/stand_base_v2")
 FIXED_BASELINE_MODEL = FIXED_BASELINE_DIR / "final_model.zip"
 
 DEFAULT_CHECKPOINT_FREQ = 25_000
+DEFAULT_ACTION_FILTER_TAU = 0.05
 
 FRICTION_A_DIR = Path("runs/stand_friction_a_07_09")
 FRICTION_AB_DIR = Path("runs/stand_friction_ab_065_095")
-FRICTION_B_DIR = Path("runs/stand_friction_b_06_10")
-FRICTION_C_DIR = Path("runs/stand_friction_c_05_11")
+FILTERED_FIXED_DIR = Path("runs/stand_action_filter_tau005_from_jitter5k_5k")
 
 FRICTION_A_MODEL = FRICTION_A_DIR / "final_model.zip"
 FRICTION_B_CAPABLE_MODEL = FRICTION_AB_DIR / "final_model.zip"
-CURRENT_BASELINE_MODEL = FRICTION_B_CAPABLE_MODEL
+FILTERED_FIXED_MODEL = FILTERED_FIXED_DIR / "checkpoints" / "stand_policy_2000_steps.zip"
+CURRENT_BASELINE_MODEL = FILTERED_FIXED_MODEL
 
-DEFAULT_VIEWER_FRICTION_RANGE = (0.6, 1.0)
+DEFAULT_VIEWER_FRICTION_RANGE = (0.8, 0.8)

@@ -53,6 +53,8 @@ def parse_args():
     )
     parser.add_argument(
         "--log-every-step",
+        "--timeline",
+        dest="log_every_step",
         action="store_true",
         help="Write timeline.csv with one row per environment step.",
     )
@@ -68,7 +70,37 @@ def parse_args():
         default=250,
         help="Number of final steps to summarize as the settled standing window.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--freeze-after-steps",
+        type=int,
+        default=None,
+        help="After this many policy steps, reuse the mean action from the preceding freeze window.",
+    )
+    parser.add_argument(
+        "--freeze-average-window",
+        type=int,
+        default=100,
+        help="Number of policy actions to average before freezing.",
+    )
+    parser.add_argument(
+        "--action-filter-tau",
+        type=float,
+        default=None,
+        help="Optional eval-only action low-pass filter time constant in seconds.",
+    )
+    args = parser.parse_args()
+    if args.freeze_after_steps is not None and args.freeze_after_steps <= 0:
+        parser.error("--freeze-after-steps must be positive when provided")
+    if args.freeze_average_window <= 0:
+        parser.error("--freeze-average-window must be positive")
+    if (
+        args.freeze_after_steps is not None
+        and args.freeze_average_window > args.freeze_after_steps
+    ):
+        parser.error("--freeze-average-window cannot exceed --freeze-after-steps")
+    if args.action_filter_tau is not None and args.action_filter_tau <= 0.0:
+        parser.error("--action-filter-tau must be positive when provided")
+    return args
 
 
 def _json_ready(value: Any) -> Any:
@@ -90,9 +122,30 @@ def _foot_map(values: list[float]) -> dict[str, float]:
     }
 
 
+def _term_foot_map(terms: dict[str, float], prefix: str) -> dict[str, float]:
+    return {
+        leg: float(terms.get(f"{prefix}_{leg}", 0.0))
+        for leg in LEG_PREFIXES
+    }
+
+
 def _leg_action_means(action: np.ndarray) -> dict[str, float]:
     return {
         leg: float(np.mean(np.abs(action[index * 3:(index + 1) * 3])))
+        for index, leg in enumerate(LEG_PREFIXES)
+    }
+
+
+def _leg_action_rates(action_delta: np.ndarray) -> dict[str, float]:
+    return {
+        leg: float(np.mean(action_delta[index * 3:(index + 1) * 3] ** 2))
+        for index, leg in enumerate(LEG_PREFIXES)
+    }
+
+
+def _leg_action_rate_means(action_deltas: np.ndarray) -> dict[str, float]:
+    return {
+        leg: float(np.mean(action_deltas[:, index * 3:(index + 1) * 3] ** 2))
         for index, leg in enumerate(LEG_PREFIXES)
     }
 
@@ -148,10 +201,35 @@ def _empty_window_summary() -> dict[str, Any]:
         "contact_foot_slip_distance": {leg: 0.0 for leg in LEG_PREFIXES},
         "total_contact_foot_slip_distance": 0.0,
         "foot_world_displacement": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_active_duty": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_displacement": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_error": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_reset_count": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_deactivate_count": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_anchor_off_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_load_below_20n_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_load_below_15n_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_load_below_8n_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_load_below_5n_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "base_displacement_from_active_ref": 0.0,
         "action_mean_per_joint": [0.0] * 12,
         "action_std_per_joint": [0.0] * 12,
         "action_mean_abs_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
         "action_pair_delta": 0.0,
+        "raw_action_mean_per_joint": [0.0] * 12,
+        "raw_action_std_per_joint": [0.0] * 12,
+        "raw_action_mean_abs_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
+        "raw_action_pair_delta": 0.0,
+        "executed_action_mean_per_joint": [0.0] * 12,
+        "executed_action_std_per_joint": [0.0] * 12,
+        "executed_action_mean_abs_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
+        "executed_action_pair_delta": 0.0,
+        "mean_abs_raw_action_delta": 0.0,
+        "max_abs_raw_action_delta": 0.0,
+        "raw_action_rate_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
+        "mean_abs_executed_action_delta": 0.0,
+        "max_abs_executed_action_delta": 0.0,
+        "executed_action_rate_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
         "joint_error_from_nominal": 0.0,
     }
 
@@ -172,6 +250,10 @@ def _window_summary(
     trunk_y_up = np.array([item["trunk_y_up"] for item in records], dtype=np.float64)
     tilt_error = np.array([item["tilt_error"] for item in records], dtype=np.float64)
     actions = np.stack([item["action"] for item in records]).astype(np.float64)
+    raw_actions = np.stack([item["raw_action"] for item in records]).astype(np.float64)
+    executed_actions = np.stack([item["executed_action"] for item in records]).astype(np.float64)
+    raw_action_deltas = np.stack([item["raw_action_delta"] for item in records]).astype(np.float64)
+    executed_action_deltas = np.stack([item["executed_action_delta"] for item in records]).astype(np.float64)
     joints = np.stack([item["joint_pos"] for item in records]).astype(np.float64)
     final = records[-1]
     base_dx = float(final["base_x"] - reset_base_xz[0])
@@ -181,6 +263,18 @@ def _window_summary(
     contact_switches = {}
     slip_distance = {}
     foot_displacement = {}
+    anchor_active_duty = {}
+    anchor_displacement = {}
+    anchor_error = {}
+    anchor_reset_count = {}
+    anchor_deactivate_count = {}
+    anchor_off_frames = {}
+    below_count_maps = {
+        "foot_load_below_20n_frames": {},
+        "foot_load_below_15n_frames": {},
+        "foot_load_below_8n_frames": {},
+        "foot_load_below_5n_frames": {},
+    }
     load_shares = {}
     min_foot_load = float("inf")
     for index, leg in enumerate(LEG_PREFIXES):
@@ -189,10 +283,24 @@ def _window_summary(
         contact_switches[leg] = int(sum(item["contact_switches"][index] for item in records))
         slip_distance[leg] = float(sum(item["contact_slip_increment"][index] for item in records))
         foot_displacement[leg] = float(final["foot_displacements"][index])
+        anchor_active_duty[leg] = float(np.mean([item["foot_anchor_active"][leg] for item in records]))
+        anchor_displacement[leg] = float(final["foot_anchor_displacement"][leg])
+        anchor_error[leg] = float(final["foot_anchor_error"][leg])
+        anchor_reset_count[leg] = float(final["foot_anchor_reset_count"][leg])
+        anchor_deactivate_count[leg] = float(final["foot_anchor_deactivate_count"][leg])
+        anchor_off_frames[leg] = float(final["foot_anchor_off_frames"][leg])
+        for key in below_count_maps:
+            below_count_maps[key][leg] = float(final[key][leg])
         load_shares[leg] = float(np.mean([item["foot_load_shares"][index] for item in records]))
         min_foot_load = min(min_foot_load, min(item["foot_loads"][index] for item in records))
 
     action_leg_means = _leg_action_means(np.mean(np.abs(actions), axis=0))
+    raw_action_leg_means = _leg_action_means(np.mean(np.abs(raw_actions), axis=0))
+    executed_action_leg_means = _leg_action_means(np.mean(np.abs(executed_actions), axis=0))
+    raw_action_rate_per_leg = _leg_action_rate_means(raw_action_deltas)
+    executed_action_rate_per_leg = _leg_action_rate_means(executed_action_deltas)
+    active_ref_dx = float(final["base_x"] - final["base_ref_x"])
+    active_ref_dz = float(final["base_z"] - final["base_ref_z"])
     return {
         "steps": len(records),
         "mean_lin_vel_x": float(np.mean(lin_x)),
@@ -202,6 +310,11 @@ def _window_summary(
         "base_displacement_from_reset": float((base_dx * base_dx + base_dz * base_dz) ** 0.5),
         "base_dx_from_reset": base_dx,
         "base_dz_from_reset": base_dz,
+        "base_ref_x": float(final["base_ref_x"]),
+        "base_ref_z": float(final["base_ref_z"]),
+        "base_displacement_from_active_ref": float((active_ref_dx * active_ref_dx + active_ref_dz * active_ref_dz) ** 0.5),
+        "base_dx_from_active_ref": active_ref_dx,
+        "base_dz_from_active_ref": active_ref_dz,
         "yaw_drift_from_reset": _angle_delta(float(final["yaw"]), reset_yaw),
         "mean_trunk_x_up": float(np.mean(trunk_x_up)),
         "mean_trunk_y_up": float(np.mean(trunk_y_up)),
@@ -217,10 +330,35 @@ def _window_summary(
         "total_contact_foot_slip_distance": float(sum(slip_distance.values())),
         "foot_world_displacement": foot_displacement,
         "max_foot_world_displacement": float(max(foot_displacement.values(), default=0.0)),
+        "foot_anchor_active_duty": anchor_active_duty,
+        "foot_anchor_displacement": anchor_displacement,
+        "max_foot_anchor_displacement": float(max(anchor_displacement.values(), default=0.0)),
+        "foot_anchor_error": anchor_error,
+        "max_foot_anchor_error": float(max(anchor_error.values(), default=0.0)),
+        "foot_anchor_reset_count": anchor_reset_count,
+        "total_foot_anchor_resets": float(sum(anchor_reset_count.values())),
+        "foot_anchor_deactivate_count": anchor_deactivate_count,
+        "total_foot_anchor_deactivations": float(sum(anchor_deactivate_count.values())),
+        "foot_anchor_off_frames": anchor_off_frames,
+        **below_count_maps,
         "action_mean_per_joint": np.mean(actions, axis=0).astype(float).tolist(),
         "action_std_per_joint": np.std(actions, axis=0).astype(float).tolist(),
         "action_mean_abs_per_leg": action_leg_means,
         "action_pair_delta": _max_pair_delta(_pair_sums(action_leg_means)),
+        "raw_action_mean_per_joint": np.mean(raw_actions, axis=0).astype(float).tolist(),
+        "raw_action_std_per_joint": np.std(raw_actions, axis=0).astype(float).tolist(),
+        "raw_action_mean_abs_per_leg": raw_action_leg_means,
+        "raw_action_pair_delta": _max_pair_delta(_pair_sums(raw_action_leg_means)),
+        "executed_action_mean_per_joint": np.mean(executed_actions, axis=0).astype(float).tolist(),
+        "executed_action_std_per_joint": np.std(executed_actions, axis=0).astype(float).tolist(),
+        "executed_action_mean_abs_per_leg": executed_action_leg_means,
+        "executed_action_pair_delta": _max_pair_delta(_pair_sums(executed_action_leg_means)),
+        "mean_abs_raw_action_delta": float(np.mean(np.abs(raw_action_deltas))),
+        "max_abs_raw_action_delta": float(np.max(np.abs(raw_action_deltas))),
+        "raw_action_rate_per_leg": raw_action_rate_per_leg,
+        "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_deltas))),
+        "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_deltas))),
+        "executed_action_rate_per_leg": executed_action_rate_per_leg,
         "joint_error_from_nominal": float(np.mean((joints - home_joint_angles) ** 2)),
     }
 
@@ -310,19 +448,49 @@ def _timeline_row(
     step: int,
     friction: float,
     obs: np.ndarray,
-    action: np.ndarray,
-    action_delta: np.ndarray,
+    raw_action: np.ndarray,
+    executed_action: np.ndarray,
+    raw_action_delta: np.ndarray,
+    executed_action_delta: np.ndarray,
+    action_mode: str,
+    action_filter_alpha: float | None,
     terms: dict[str, float],
     foot_stats: dict[str, Any],
     contact_stats: dict[str, Any],
 ) -> dict[str, Any]:
     foot_loads = _foot_map(foot_stats["foot_contact_loads"])
     foot_shares = _foot_map(foot_stats["foot_load_shares"])
-    action_means = _leg_action_means(action)
+    foot_speeds = _foot_map(foot_stats["foot_speeds"])
+    foot_displacements = _foot_map(foot_stats["foot_displacements"])
+    foot_positions = {
+        name.split("_")[0]: [float(position[0]), float(position[1])]
+        for name, position in zip(FOOT_BODY_NAMES, foot_stats["foot_positions"])
+    }
+    foot_anchor_refs = {
+        leg: [
+            float(terms.get(f"foot_anchor_ref_x_{leg}", 0.0)),
+            float(terms.get(f"foot_anchor_ref_z_{leg}", 0.0)),
+        ]
+        for leg in LEG_PREFIXES
+    }
+    action_means = _leg_action_means(executed_action)
+    raw_action_means = _leg_action_means(raw_action)
+    executed_action_means = _leg_action_means(executed_action)
+    raw_action_rates = _leg_action_rates(raw_action_delta)
+    executed_action_rates = _leg_action_rates(executed_action_delta)
     return {
         "episode": episode,
         "step": step,
         "friction": friction,
+        "base_x": float(obs[0]),
+        "base_z": float(obs[2]),
+        "base_ref_x": terms.get("base_ref_x", 0.0),
+        "base_ref_z": terms.get("base_ref_z", 0.0),
+        "base_reset_x": terms.get("base_reset_x", 0.0),
+        "base_reset_z": terms.get("base_reset_z", 0.0),
+        "base_drift": terms.get("base_drift", 0.0),
+        "base_drift_from_reset": terms.get("base_drift_from_reset", 0.0),
+        "standing_reference_captured": terms.get("standing_reference_captured", 0.0),
         "trunk_y": terms.get("trunk_y", 0.0),
         "upright_score": terms.get("upright_score", 0.0),
         "trunk_x_up": terms.get("trunk_x_up", 0.0),
@@ -334,6 +502,12 @@ def _timeline_row(
         "lin_vel_z": terms.get("lin_vel_z", 0.0),
         "mean_abs_action": terms.get("mean_abs_action", 0.0),
         "mean_abs_action_delta": terms.get("mean_abs_action_delta", 0.0),
+        "action_mode": action_mode,
+        "action_filter_alpha": "" if action_filter_alpha is None else action_filter_alpha,
+        "mean_abs_raw_action_delta": float(np.mean(np.abs(raw_action_delta))),
+        "max_abs_raw_action_delta": float(np.max(np.abs(raw_action_delta))),
+        "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_delta))),
+        "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_delta))),
         "mean_abs_joint_vel": terms.get("mean_abs_joint_vel", 0.0),
         "leg_symmetry_error": terms.get("leg_symmetry_error", 0.0),
         "foot_dxz_max": foot_stats["foot_dxz_max"],
@@ -341,14 +515,36 @@ def _timeline_row(
         "foot_load_imbalance": foot_stats["foot_load_imbalance"],
         "foot_loads": json.dumps(foot_loads, sort_keys=True),
         "foot_shares": json.dumps(foot_shares, sort_keys=True),
+        "foot_speeds": json.dumps(foot_speeds, sort_keys=True),
+        "foot_displacements": json.dumps(foot_displacements, sort_keys=True),
+        "foot_positions": json.dumps(foot_positions, sort_keys=True),
+        "foot_anchor_active": json.dumps(_term_foot_map(terms, "foot_anchor_active"), sort_keys=True),
+        "foot_anchor_refs": json.dumps(foot_anchor_refs, sort_keys=True),
+        "foot_anchor_displacement": json.dumps(_term_foot_map(terms, "foot_anchor_displacement"), sort_keys=True),
+        "foot_anchor_error": json.dumps(_term_foot_map(terms, "foot_anchor_error"), sort_keys=True),
+        "foot_anchor_reset_count": json.dumps(_term_foot_map(terms, "foot_anchor_reset_count"), sort_keys=True),
+        "foot_anchor_deactivate_count": json.dumps(_term_foot_map(terms, "foot_anchor_deactivate_count"), sort_keys=True),
+        "foot_anchor_off_frames": json.dumps(_term_foot_map(terms, "foot_anchor_off_frames"), sort_keys=True),
+        "foot_load_below_20n_frames": json.dumps(_term_foot_map(terms, "foot_load_below_20n_frames"), sort_keys=True),
+        "foot_load_below_15n_frames": json.dumps(_term_foot_map(terms, "foot_load_below_15n_frames"), sort_keys=True),
+        "foot_load_below_8n_frames": json.dumps(_term_foot_map(terms, "foot_load_below_8n_frames"), sort_keys=True),
+        "foot_load_below_5n_frames": json.dumps(_term_foot_map(terms, "foot_load_below_5n_frames"), sort_keys=True),
         "foot_pair_shares": json.dumps(_pair_sums(foot_shares), sort_keys=True),
         "action_leg_means": json.dumps(action_means, sort_keys=True),
         "action_pair_means": json.dumps(_pair_sums(action_means), sort_keys=True),
+        "raw_action_leg_means": json.dumps(raw_action_means, sort_keys=True),
+        "executed_action_leg_means": json.dumps(executed_action_means, sort_keys=True),
+        "raw_action_rate_per_leg": json.dumps(raw_action_rates, sort_keys=True),
+        "executed_action_rate_per_leg": json.dumps(executed_action_rates, sort_keys=True),
         "nonfoot_loads": json.dumps(_foot_map(contact_stats["nonfoot_loads"]), sort_keys=True),
         "max_nonfoot_load": max(contact_stats["nonfoot_loads"]),
         "joint_positions": json.dumps(obs[13:25].astype(float).tolist()),
-        "actions": json.dumps(np.asarray(action, dtype=float).tolist()),
-        "action_deltas": json.dumps(np.asarray(action_delta, dtype=float).tolist()),
+        "actions": json.dumps(np.asarray(executed_action, dtype=float).tolist()),
+        "action_deltas": json.dumps(np.asarray(executed_action_delta, dtype=float).tolist()),
+        "raw_actions": json.dumps(np.asarray(raw_action, dtype=float).tolist()),
+        "executed_actions": json.dumps(np.asarray(executed_action, dtype=float).tolist()),
+        "raw_action_deltas": json.dumps(np.asarray(raw_action_delta, dtype=float).tolist()),
+        "executed_action_deltas": json.dumps(np.asarray(executed_action_delta, dtype=float).tolist()),
     }
 
 
@@ -444,8 +640,15 @@ def diagnose_episode(
     reset_foot_xz = foot_xz_positions(tracked_feet)
     reset_base_xz = (float(obs[0]), float(obs[2]))
     reset_yaw = _yaw_from_obs(obs)
-    prev_action = np.zeros(12, dtype=np.float32)
+    prev_raw_action = np.zeros(12, dtype=np.float32)
+    prev_executed_action = np.zeros(12, dtype=np.float32)
+    filter_initialized = False
+    action_filter_alpha = None
+    if args.action_filter_tau is not None:
+        action_filter_alpha = float(_TIME_STEP / (args.action_filter_tau + _TIME_STEP))
     prev_contacts = [False] * len(FOOT_BODY_NAMES)
+    freeze_action_buffer: list[np.ndarray] = []
+    frozen_action: np.ndarray | None = None
     records: list[dict[str, Any]] = []
 
     events = {
@@ -464,6 +667,10 @@ def diagnose_episode(
         "max_foot_vxz": 0.0,
         "max_nonfoot_load": 0.0,
         "max_trunk_stance_center_error": 0.0,
+        "max_foot_anchor_displacement": 0.0,
+        "max_foot_anchor_error": 0.0,
+        "max_foot_anchor_resets": 0.0,
+        "max_foot_anchor_deactivations": 0.0,
         "min_foot_load": float("inf"),
         "min_upright_score": float("inf"),
     }
@@ -487,11 +694,31 @@ def diagnose_episode(
     final_foot_stats: dict[str, Any] = {}
 
     while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        action = np.asarray(action, dtype=np.float32)
-        action_delta = action - prev_action
-        obs, reward, terminated, truncated, info = env.step(action)
+        if frozen_action is None:
+            raw_action, _ = model.predict(obs, deterministic=True)
+            raw_action = np.asarray(raw_action, dtype=np.float32)
+            action_mode = "policy"
+        else:
+            raw_action = frozen_action.copy()
+            action_mode = "frozen"
+        if action_filter_alpha is None:
+            executed_action = raw_action.copy()
+        elif not filter_initialized:
+            executed_action = raw_action.copy()
+            filter_initialized = True
+        else:
+            executed_action = prev_executed_action + action_filter_alpha * (raw_action - prev_executed_action)
+            executed_action = executed_action.astype(np.float32)
+        raw_action_delta = raw_action - prev_raw_action
+        executed_action_delta = executed_action - prev_executed_action
+        obs, reward, terminated, truncated, info = env.step(executed_action)
         steps += 1
+        if action_mode == "policy":
+            freeze_action_buffer.append(raw_action.copy())
+            if len(freeze_action_buffer) > args.freeze_average_window:
+                freeze_action_buffer.pop(0)
+            if args.freeze_after_steps is not None and steps == args.freeze_after_steps:
+                frozen_action = np.mean(np.stack(freeze_action_buffer), axis=0).astype(np.float32)
         total_reward += float(reward)
         done = bool(terminated or truncated)
         terms = info.get("reward_terms", {})
@@ -514,7 +741,7 @@ def diagnose_episode(
             terms,
             foot_stats,
             contact_stats,
-            action,
+            executed_action,
             args.tilt_threshold,
             args.unload_threshold,
         )
@@ -527,6 +754,22 @@ def diagnose_episode(
         max_values["max_trunk_stance_center_error"] = max(
             max_values["max_trunk_stance_center_error"],
             float(terms.get("trunk_stance_center_error", 0.0)),
+        )
+        max_values["max_foot_anchor_displacement"] = max(
+            max_values["max_foot_anchor_displacement"],
+            float(terms.get("foot_anchor_max_displacement", 0.0)),
+        )
+        max_values["max_foot_anchor_error"] = max(
+            max_values["max_foot_anchor_error"],
+            max(_term_foot_map(terms, "foot_anchor_error").values(), default=0.0),
+        )
+        max_values["max_foot_anchor_resets"] = max(
+            max_values["max_foot_anchor_resets"],
+            float(terms.get("foot_anchor_total_resets", 0.0)),
+        )
+        max_values["max_foot_anchor_deactivations"] = max(
+            max_values["max_foot_anchor_deactivations"],
+            float(terms.get("foot_anchor_total_deactivations", 0.0)),
         )
         max_values["min_foot_load"] = min(max_values["min_foot_load"], float(min(foot_loads)))
         max_values["min_upright_score"] = min(
@@ -546,6 +789,8 @@ def diagnose_episode(
             "step": steps,
             "base_x": float(obs[0]),
             "base_z": float(obs[2]),
+            "base_ref_x": float(terms.get("base_ref_x", 0.0)),
+            "base_ref_z": float(terms.get("base_ref_z", 0.0)),
             "yaw": _yaw_from_obs(obs),
             "lin_vel_x": float(terms.get("lin_vel_x", 0.0)),
             "lin_vel_z": float(terms.get("lin_vel_z", 0.0)),
@@ -555,10 +800,25 @@ def diagnose_episode(
             "foot_loads": [float(value) for value in foot_stats["foot_contact_loads"]],
             "foot_load_shares": [float(value) for value in foot_stats["foot_load_shares"]],
             "foot_displacements": [float(value) for value in foot_stats["foot_displacements"]],
+            "foot_anchor_active": _term_foot_map(terms, "foot_anchor_active"),
+            "foot_anchor_displacement": _term_foot_map(terms, "foot_anchor_displacement"),
+            "foot_anchor_error": _term_foot_map(terms, "foot_anchor_error"),
+            "foot_anchor_reset_count": _term_foot_map(terms, "foot_anchor_reset_count"),
+            "foot_anchor_deactivate_count": _term_foot_map(terms, "foot_anchor_deactivate_count"),
+            "foot_anchor_off_frames": _term_foot_map(terms, "foot_anchor_off_frames"),
+            "foot_load_below_20n_frames": _term_foot_map(terms, "foot_load_below_20n_frames"),
+            "foot_load_below_15n_frames": _term_foot_map(terms, "foot_load_below_15n_frames"),
+            "foot_load_below_8n_frames": _term_foot_map(terms, "foot_load_below_8n_frames"),
+            "foot_load_below_5n_frames": _term_foot_map(terms, "foot_load_below_5n_frames"),
             "contacts": contacts,
             "contact_switches": contact_switches,
             "contact_slip_increment": contact_slip_increment,
-            "action": action.astype(float).copy(),
+            "action_mode": action_mode,
+            "action": executed_action.astype(float).copy(),
+            "raw_action": raw_action.astype(float).copy(),
+            "executed_action": executed_action.astype(float).copy(),
+            "raw_action_delta": raw_action_delta.astype(float).copy(),
+            "executed_action_delta": executed_action_delta.astype(float).copy(),
             "joint_pos": obs[13:25].astype(float).copy(),
         })
 
@@ -568,8 +828,12 @@ def diagnose_episode(
                 steps,
                 friction,
                 obs,
-                action,
-                action_delta,
+                raw_action,
+                executed_action,
+                raw_action_delta,
+                executed_action_delta,
+                action_mode,
+                action_filter_alpha,
                 terms,
                 foot_stats,
                 contact_stats,
@@ -577,7 +841,8 @@ def diagnose_episode(
             _write_timeline_header(timeline_writer, row, timeline_state)
             timeline_writer.writerow(row)
 
-        prev_action = action.copy()
+        prev_raw_action = raw_action.copy()
+        prev_executed_action = executed_action.copy()
         prev_contacts = contacts
         final_terms = terms
         final_foot_stats = foot_stats
@@ -600,6 +865,17 @@ def diagnose_episode(
         "truncated": bool(truncated),
         "termination_reason": info.get("termination_reason") or ("truncated" if truncated else "unknown"),
         "friction": friction,
+        "freeze_action": {
+            "enabled": args.freeze_after_steps is not None,
+            "freeze_step": args.freeze_after_steps,
+            "freeze_average_window": args.freeze_average_window,
+            "frozen_action": None if frozen_action is None else frozen_action.astype(float).tolist(),
+        },
+        "action_filter": {
+            "enabled": args.action_filter_tau is not None,
+            "tau": args.action_filter_tau,
+            "alpha": action_filter_alpha,
+        },
         "final_tilt_direction": _tilt_direction(final_terms),
         "final_axis_up": {
             "trunk_x_up": float(final_terms.get("trunk_x_up", 0.0)),
@@ -640,6 +916,9 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "base_displacement_from_reset",
         "base_dx_from_reset",
         "base_dz_from_reset",
+        "base_displacement_from_active_ref",
+        "base_dx_from_active_ref",
+        "base_dz_from_active_ref",
         "yaw_drift_from_reset",
         "mean_trunk_x_up",
         "mean_trunk_y_up",
@@ -650,7 +929,17 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "total_contact_switches",
         "total_contact_foot_slip_distance",
         "max_foot_world_displacement",
+        "max_foot_anchor_displacement",
+        "max_foot_anchor_error",
+        "total_foot_anchor_resets",
+        "total_foot_anchor_deactivations",
         "action_pair_delta",
+        "raw_action_pair_delta",
+        "executed_action_pair_delta",
+        "mean_abs_raw_action_delta",
+        "max_abs_raw_action_delta",
+        "mean_abs_executed_action_delta",
+        "max_abs_executed_action_delta",
         "joint_error_from_nominal",
     )
     result = {
@@ -679,8 +968,64 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
             [window["foot_world_displacement"] for window in windows],
             LEG_PREFIXES,
         ),
+        "foot_anchor_active_duty": _mean_dict_values(
+            [window["foot_anchor_active_duty"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_anchor_displacement": _mean_dict_values(
+            [window["foot_anchor_displacement"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_anchor_error": _mean_dict_values(
+            [window["foot_anchor_error"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_anchor_reset_count": _mean_dict_values(
+            [window["foot_anchor_reset_count"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_anchor_deactivate_count": _mean_dict_values(
+            [window["foot_anchor_deactivate_count"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_anchor_off_frames": _mean_dict_values(
+            [window["foot_anchor_off_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_load_below_20n_frames": _mean_dict_values(
+            [window["foot_load_below_20n_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_load_below_15n_frames": _mean_dict_values(
+            [window["foot_load_below_15n_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_load_below_8n_frames": _mean_dict_values(
+            [window["foot_load_below_8n_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_load_below_5n_frames": _mean_dict_values(
+            [window["foot_load_below_5n_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
         "action_mean_abs_per_leg": _mean_dict_values(
             [window["action_mean_abs_per_leg"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "raw_action_mean_abs_per_leg": _mean_dict_values(
+            [window["raw_action_mean_abs_per_leg"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "executed_action_mean_abs_per_leg": _mean_dict_values(
+            [window["executed_action_mean_abs_per_leg"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "raw_action_rate_per_leg": _mean_dict_values(
+            [window["raw_action_rate_per_leg"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "executed_action_rate_per_leg": _mean_dict_values(
+            [window["executed_action_rate_per_leg"] for window in windows],
             LEG_PREFIXES,
         ),
         "p95": {
@@ -688,9 +1033,14 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
             for key in (
                 "mean_abs_xz_vel",
                 "base_displacement_from_reset",
+                "base_displacement_from_active_ref",
                 "mean_tilt_error",
                 "total_contact_foot_slip_distance",
                 "total_contact_switches",
+                "max_foot_anchor_displacement",
+                "total_foot_anchor_deactivations",
+                "mean_abs_executed_action_delta",
+                "max_abs_executed_action_delta",
             )
         },
     }
@@ -712,11 +1062,17 @@ def _episode_replay_metadata(item: dict[str, Any], metric: str, value: float) ->
         "settled_summary": {
             "mean_abs_xz_vel": settled.get("mean_abs_xz_vel"),
             "base_displacement_from_reset": settled.get("base_displacement_from_reset"),
+            "base_displacement_from_active_ref": settled.get("base_displacement_from_active_ref"),
             "mean_tilt_error": settled.get("mean_tilt_error"),
             "total_contact_foot_slip_distance": settled.get("total_contact_foot_slip_distance"),
             "total_contact_switches": settled.get("total_contact_switches"),
             "min_foot_load": settled.get("min_foot_load"),
             "foot_load_shares": settled.get("foot_load_shares"),
+            "foot_anchor_active_duty": settled.get("foot_anchor_active_duty"),
+            "foot_anchor_reset_count": settled.get("foot_anchor_reset_count"),
+            "foot_anchor_deactivate_count": settled.get("foot_anchor_deactivate_count"),
+            "foot_load_below_20n_frames": settled.get("foot_load_below_20n_frames"),
+            "foot_load_below_5n_frames": settled.get("foot_load_below_5n_frames"),
         },
     }
 
@@ -769,6 +1125,20 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
         "policy": str(args.policy),
         "terrain": args.terrain,
         "friction_range": [args.friction_min, args.friction_max],
+        "freeze_action": {
+            "enabled": args.freeze_after_steps is not None,
+            "freeze_step": args.freeze_after_steps,
+            "freeze_average_window": args.freeze_average_window,
+            "frozen_actions": [
+                item.get("freeze_action", {}).get("frozen_action")
+                for item in episodes
+            ],
+        },
+        "action_filter": {
+            "enabled": args.action_filter_tau is not None,
+            "tau": args.action_filter_tau,
+            "alpha": None if args.action_filter_tau is None else float(_TIME_STEP / (args.action_filter_tau + _TIME_STEP)),
+        },
         "episodes": len(episodes),
         "survival_rate": 1.0 - failures / max(1, len(episodes)),
         "mean_length": float(np.mean(lengths)) if lengths else 0.0,
@@ -787,6 +1157,16 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
             "max_foot_dxz": max((item["max_foot_dxz"] for item in max_values), default=0.0),
             "max_trunk_stance_center_error": max(
                 (item["max_trunk_stance_center_error"] for item in max_values),
+                default=0.0,
+            ),
+            "max_foot_anchor_displacement": max(
+                (item["max_foot_anchor_displacement"] for item in max_values),
+                default=0.0,
+            ),
+            "max_foot_anchor_error": max((item["max_foot_anchor_error"] for item in max_values), default=0.0),
+            "max_foot_anchor_resets": max((item["max_foot_anchor_resets"] for item in max_values), default=0.0),
+            "max_foot_anchor_deactivations": max(
+                (item["max_foot_anchor_deactivations"] for item in max_values),
                 default=0.0,
             ),
             "max_nonfoot_load": max((item["max_nonfoot_load"] for item in max_values), default=0.0),
@@ -820,6 +1200,20 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     print(f"mean_reward: {aggregate['mean_reward']:.3f}")
     print(f"friction_min_seen: {aggregate['friction_min_seen']:.3f}")
     print(f"friction_max_seen: {aggregate['friction_max_seen']:.3f}")
+    if aggregate.get("freeze_action", {}).get("enabled"):
+        freeze = aggregate["freeze_action"]
+        print(
+            "freeze_action: "
+            f"step={freeze['freeze_step']} "
+            f"window={freeze['freeze_average_window']}"
+        )
+    if aggregate.get("action_filter", {}).get("enabled"):
+        action_filter = aggregate["action_filter"]
+        print(
+            "action_filter: "
+            f"tau={action_filter['tau']} "
+            f"alpha={action_filter['alpha']:.6f}"
+        )
     print(f"cause_counts: {aggregate['cause_counts']}")
     print(f"failure_type_counts: {aggregate['failure_type_counts']}")
     print(f"final_tilt_directions: {aggregate['final_tilt_directions']}")
@@ -834,11 +1228,18 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     for key in (
         "mean_abs_xz_vel",
         "base_displacement_from_reset",
+        "base_displacement_from_active_ref",
         "mean_tilt_error",
         "total_contact_foot_slip_distance",
         "total_contact_switches",
         "min_foot_load",
+        "max_foot_anchor_displacement",
+        "total_foot_anchor_resets",
+        "total_foot_anchor_deactivations",
         "action_pair_delta",
+        "mean_abs_raw_action_delta",
+        "mean_abs_executed_action_delta",
+        "max_abs_executed_action_delta",
     ):
         print(f"  {key}: {settled[key]:.6f}")
 

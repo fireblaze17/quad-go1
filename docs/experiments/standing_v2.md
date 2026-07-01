@@ -1,5 +1,10 @@
 # Standing V2 Model Card
 
+> Historical note: this is the old fixed-friction model card. The current
+> accepted fixed-friction baseline is the filtered 2k checkpoint documented in
+> [fixed_friction_standing.md](fixed_friction_standing.md). This page is kept
+> for provenance, not as the active baseline.
+
 ## Summary
 
 Flat-ground standing v2 is the accepted fixed-friction baseline for the Chrono
