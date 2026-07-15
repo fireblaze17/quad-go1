@@ -1,16 +1,19 @@
 # Standing V2 Model Card
 
 > Historical note: this is the old fixed-friction model card. The current
-> accepted fixed-friction baseline is the filtered 2k checkpoint documented in
-> [fixed_friction_standing.md](fixed_friction_standing.md). This page is kept
-> for provenance, not as the active baseline.
+> accepted baseline is the randomized 10k checkpoint with `action_filter_tau=0.05`
+> and foot friction `2.0`, documented in
+> [fixed_friction_standing.md](fixed_friction_standing.md) and
+> [../reproduction_ladder.md](../reproduction_ladder.md). This page is kept for
+> provenance, not as the active baseline.
 
 ## Summary
 
-Flat-ground standing v2 is the accepted fixed-friction baseline for the Chrono
-Go1 environment. It stands for the full 1000-step episode, keeps all four feet
-near the terrain, avoids non-foot leg contact, and has no obvious vibration in
-the viewer.
+Flat-ground standing v2 was an early accepted fixed-friction milestone for the
+Chrono Go1 environment. It stood for the full 1000-step episode, kept all four
+feet near the terrain, avoided non-foot leg contact, and had no obvious
+vibration in the viewer. Later settled-window diagnostics showed it was not
+final-clean standing.
 
 ## Training Command
 
@@ -47,6 +50,9 @@ foot contact:        friction=0.9, restitution=0.01, Gn=60
 minimum foot load:   20 N
 ```
 
+The current code now uses foot friction `2.0`; the value above describes this
+historical model card only.
+
 ## Reward Weights
 
 These weights describe the historical fixed-friction standing v2 checkpoint and
@@ -66,8 +72,8 @@ xz_vel_penalty          0.20 * mean([vx, vz]^2)
 foot_contact_penalty    0.10 * mean(missing_foot_load^2)
 ```
 
-`leg_symmetry_error` is logged for diagnosis, but is not used as an active
-reward penalty in this accepted baseline.
+`leg_symmetry_error` was logged for diagnosis, but was not used as an active
+reward penalty in this historical baseline.
 
 ## Evaluation Command
 
@@ -116,10 +122,10 @@ hip_load=(FR:+0.0,FL:+0.0,RR:+0.0,RL:+0.0)
 nonfoot_load_max=(FR:+0.0,FL:+0.0,RR:+0.0,RL:+0.0)
 ```
 
-## Known Limitations
+## Historical Limitations
 
-- This is fixed-friction flat-ground standing, not robust standing.
-- The policy is not yet trained on randomized friction.
+- This was fixed-friction flat-ground standing, not the current robust baseline.
+- Later work accepted randomized effective friction `0.5-1.2`.
 - The policy has not yet been validated on SCM deformable terrain.
 - Foot-contact reward magnitudes may need retuning on SCM if contact forces
   differ significantly.

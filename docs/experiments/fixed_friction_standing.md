@@ -1,6 +1,6 @@
 # Fixed-Friction Standing ADR Log
 
-This file records the fixed-friction standing cleanup that produced the current
+This file records the standing cleanup lineage that produced the current
 accepted baseline. Each entry is an architecture/experiment decision record.
 
 ## ADR-001: Survival-Only Fixed And AB Baselines Were Not Clean Standing
@@ -156,7 +156,7 @@ unless an explicit ablation disables it.
 
 ## ADR-009: Filtered Fine-Tune Promoted The 2k Checkpoint
 
-**Status:** Accepted current baseline
+**Status:** Accepted fixed-friction fallback
 
 **Context:** The action filter was moved into `Go1Env` as an opt-in environment
 feature and a short conservative fine-tune was run from the jitter baseline:
@@ -183,8 +183,8 @@ settled contact switches: 0
 settled min foot load: 26.68 N
 ```
 
-**Consequences:** Fixed-friction `mu=0.8` standing is accepted. The next work is
-friction bridge testing, not more fixed-0.8 reward shaping.
+**Consequences:** Fixed-friction `mu=0.8` standing is accepted. This checkpoint
+became the clean fixed fallback and source for randomized-friction training.
 
 ## ADR-010: Deferred Jitter Rewards And Friction-Usage Penalties
 
@@ -201,3 +201,152 @@ cleanly.
 
 **Consequences:** Keep the reward simpler. Revisit these terms only if friction
 randomization reintroduces action-jitter or contact-usage failures.
+
+## ADR-011: Fixed-Friction Bridge Before Randomized Friction
+
+**Status:** Historical, superseded by ADR-012
+
+**Context:** The fixed `mu=0.8` standing baseline is now clean with
+`action_filter_tau=0.05`, but randomized-friction training should not be used
+to hide an unresolved fixed-friction problem. Chrono's SMC contact material
+composition uses `ChContactMaterialCompositionStrategy::CombineFriction`, which
+combines two contacting material frictions with `min(a, b)`.
+
+The active model uses:
+
+```text
+ground friction: sampled from friction_range
+foot friction: 0.9
+effective friction: min(ground friction, 0.9)
+contact method: SMC
+SetFriction note: current setup uses the same Chrono friction value for static/sliding contact
+```
+
+Foot friction `0.9` is a dry rubber-foot assumption for this phase, not a
+measured Unitree Go1 value.
+
+**Decision:** Freeze the accepted filtered 2k checkpoint and run fixed
+effective-friction bridge slices before PPO updates:
+
+```text
+policy: runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+action_filter_tau: 0.05
+main slices: ground mu = 0.6, 0.7, 0.8, 0.9
+episodes: 30 deterministic episodes per slice
+max_steps: 5000
+```
+
+Because foot friction caps the effective value at `0.9`, `ground mu=1.0` and
+`1.1` are optional saturation checks, not the main training range. A lower
+`mu=0.5` run is an optional stress check.
+
+If `0.6-0.9` passes, start conservative randomized-friction fine-tuning over
+`0.6-0.9`. If only `0.7-0.9` is clean, start with `0.7-0.9` and diagnose the
+low-friction slice before widening.
+
+**Evidence:** Local PyChrono/header inspection showed the default material
+composition strategy returns the minimum friction. The accepted filtered
+baseline already passed fixed `mu=0.8`; the open question is whether it remains
+clean across nearby fixed effective frictions.
+
+**Consequences:** Diagnostics now log configured ground friction, configured
+foot friction, effective friction, contact material metadata, and per-foot
+friction usage:
+
+```text
+friction_usage = tangential_contact_force / (effective_mu * normal_force + eps)
+```
+
+Randomized checkpoints should be promoted by worst fixed-slice behavior, not by
+average randomized reward. Stop or reject a run if nominal `mu=0.8` regresses,
+contact switches return, loaded-foot slip grows, or friction usage repeatedly
+approaches/exceeds `1.0`.
+
+This plan produced the `0.6-0.9` randomized checkpoint documented in ADR-012,
+then foot friction was raised to `2.0` so the target range could extend above
+effective `0.9`.
+
+## ADR-012: Randomized Friction 0.6-0.9 Promoted The 10k Checkpoint
+
+**Status:** Accepted
+
+**Context:** The filtered fixed checkpoint solved nominal `mu=0.8`, but the
+policy needed robustness across a meaningful flat-ground friction range.
+Training too long had already caused regressions in earlier experiments, so
+checkpoint selection had to use fixed-slice diagnostics rather than final PPO
+step count or average reward alone.
+
+**Decision:** Fine-tune from the filtered fixed 2k checkpoint with conservative
+PPO over ground friction `0.6-0.9`:
+
+```text
+load: runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+save_dir: runs/stand_friction_random_060_090_tau005_from_filtered2k
+timesteps: 50000
+checkpoint_freq: 5000
+learning_rate: 0.00005
+clip_range: 0.05
+target_kl: 0.01
+action_filter_tau: 0.05
+```
+
+Promote the 10k checkpoint:
+
+```text
+runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
+```
+
+**Evidence:** The 10k checkpoint preserved the clean fixed-slice behavior while
+later checkpoints did not improve the worst-slice margin enough to justify
+promotion. It also passed probes below the original training range, including
+`mu=0.5` and `0.55`, before the foot-friction cap was removed.
+
+**Consequences:** The current friction-trained source is the 10k checkpoint, not
+the final 50k model. Future randomized runs should be selected by worst fixed
+slice, not by longest training or average randomized reward.
+
+## ADR-013: Foot Friction 2.0 Removes The Effective-Friction Cap
+
+**Status:** Accepted experiment setting
+
+**Context:** The `0.6-0.9` randomized checkpoint promoted at 10k steps passed
+fixed-slice probes at `mu=0.5` and `0.55`, and all main slices from `0.6-0.9`.
+The next target is effective friction `0.5-1.2`. Chrono combines material
+friction with `min(ground, foot)`, so the old foot friction `0.9` capped all
+ground values above `0.9`.
+
+**Decision:** Set hardcoded foot friction to `2.0` instead of adding a CLI flag.
+This is a cap-removal modeling setting, not a measured Unitree Go1 material.
+For all target ground values `0.5-1.2`, effective friction is now the ground
+friction.
+
+**Evidence:** Local PyChrono/header checks showed `CombineFriction(a, b)` uses
+`std::min`. With foot friction `2.0`, each target slice in `0.5-1.2` is no
+longer capped by the foot material.
+
+**Consequences:** Evaluate the current randomized 10k checkpoint across
+`0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2` before training. If any slice fails, train
+from the clean filtered fixed baseline with lower LR, not from the already
+randomized `0.6-0.9` checkpoint.
+
+The evaluation passed all slices, so the fallback training branch was not run:
+
+```text
+slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 30 per slice
+failure_type_counts: {'nominal': 30} on every slice
+survival_rate: 1.000 on every slice
+worst active-reference drift: 0.001558 m
+worst settled total contact foot slip: 0.003871 m
+settled contact switches: 0 on every slice
+worst settled min foot load: 28.53 N
+max settled friction usage: 0.01833
+```
+
+The accepted current baseline is therefore:
+
+```text
+runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
+action_filter_tau = 0.05
+_FOOT_FRICTION = 2.0
+```

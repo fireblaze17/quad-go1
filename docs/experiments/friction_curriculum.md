@@ -1,17 +1,18 @@
 # Flat Friction Curriculum
 
 > Historical note: this document records the pre-action-filter A/AB/C friction
-> curriculum. The current accepted baseline is the filtered fixed-friction
-> checkpoint documented in
-> [fixed_friction_standing.md](fixed_friction_standing.md). Use this file as
+> curriculum. The current accepted baseline is the randomized 10k checkpoint
+> with `action_filter_tau=0.05` and foot friction `2.0`, documented in
+> [fixed_friction_standing.md](fixed_friction_standing.md) and
+> [../reproduction_ladder.md](../reproduction_ladder.md). Use this file as
 > archived evidence, not as the current standing baseline.
 
 ## Summary
 
-The current standing v2 checkpoint is the fixed-friction anchor. Historically,
-the flat friction curriculum continued training from that anchor through wider
-friction ranges. The active workflow now keeps only the base/A helper and uses
-manual, explicitly named experiments for any new AB retry.
+The old standing v2 checkpoint was the fixed-friction anchor for this archived
+curriculum. Historically, the flat friction curriculum continued training from
+that anchor through wider friction ranges. The active workflow now uses the
+newer filtered-control lineage instead.
 
 ```text
 runs/stand_base_v2
@@ -291,9 +292,9 @@ python view_stand_policy.py runs/stand_friction_ab_065_095/final_model.zip --ter
 
 Range: `0.5-1.1`
 
-Status: AB is the official current baseline on this range. The trained
-C-from-AB continuation and three equal-budget scratch-C seeds all survived, but
-all were rejected on cleaner-standing criteria.
+Status: AB was the official baseline for this archived C-range comparison. The
+trained C-from-AB continuation and three equal-budget scratch-C seeds all
+survived, but all were rejected on cleaner-standing criteria.
 
 The accepted AB checkpoint was tested directly on the wider C range before any
 new C training:
@@ -347,8 +348,8 @@ Interpretation:
 - The transient `min_foot_load: 0.0` appears in the worst case, but there is no
   tilt threshold crossing, no non-foot support, and no single FL-heavy support
   attractor like the rejected B continuations.
-- Viewer inspection on `0.5-1.1` looked clean, so AB is the active C-capable
-  reference until another model beats it.
+- Viewer inspection on `0.5-1.1` looked clean, so AB was the archived
+  C-capable reference until the later filtered-control lineage replaced it.
 
 The first C continuation loaded from the accepted AB B-capable checkpoint. That
 local run was later deleted after its failure signature was documented. It had
@@ -467,7 +468,7 @@ Final C-range comparison:
 
 | Model family | Training path | Timesteps | Survival | Upright | Contact error | Min foot load | X/Z drift | Diagnosis pattern | Decision |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| AB-on-C | fixed 0.8 -> A -> AB, tested on C | 700k staged | 1.000 | 0.999 | 0.009350 | 23.431 N | 0.011950 | no tilt crossing; mostly diagonal load | accepted/current baseline |
+| AB-on-C | fixed 0.8 -> A -> AB, tested on C | 700k staged | 1.000 | 0.999 | 0.009350 | 23.431 N | 0.011950 | no tilt crossing; mostly diagonal load | accepted archived baseline |
 | C-from-AB | fixed 0.8 -> A -> AB -> C | 1.0M staged | 1.000 | 0.999 | 0.016239 | 20.134 N | 0.045557 | no tilt crossing, but FL-heavy left/right bias | rejected: drift/sliding and asymmetric support |
 | Scratch C seed1 | random init -> C | 700k | 1.000 | 0.996 | 0.016500 | 19.784 N | 0.024861 | foot unload before tilt in 100/100; FL-heavy | rejected: worse contact/upright/load balance |
 | Scratch C seed2 | random init -> C | 700k | 1.000 | 0.987 | 0.104047 | 15.162 N | 0.044395 | foot unload before tilt in 100/100; left/right bias | rejected: large contact/upright regression |
@@ -486,8 +487,9 @@ Interpretation:
 - AB is accepted because it is the cleanest standing policy under the shared
   C-range battery and viewer check, not because curriculum is assumed to be
   automatically better.
-- A future model must beat AB on eval, diagnosis, and viewer behavior before it
-  replaces the current baseline. A scratch seed with 100% survival is not enough.
+- In this archived comparison, a future model had to beat AB on eval,
+  diagnosis, and viewer behavior before replacing it. A scratch seed with 100%
+  survival was not enough.
 
 Held-out friction `0.4` and `1.2` were diagnostic only. They helped show
 whether the learned policy was close to extrapolating beyond the training range.

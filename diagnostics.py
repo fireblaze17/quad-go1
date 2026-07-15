@@ -38,23 +38,34 @@ def body_loads_y(bodies: list[Any]) -> list[float]:
 def foot_debug_stats(
     feet: list[Any],
     reset_xz: list[tuple[float, float]],
+    effective_mu: float | None = None,
 ) -> dict[str, Any]:
     displacements = []
     speeds = []
     heights = []
     contact_loads = []
+    tangential_forces = []
+    friction_usage = []
     positions = []
 
     for body, (reset_x, reset_z) in zip(feet, reset_xz):
         pos = body.GetPos()
         vel = body.GetPosDt()
+        force = body.GetContactForce()
         dx = float(pos.x) - reset_x
         dz = float(pos.z) - reset_z
+        normal_force = abs(float(force.y))
+        tangential_force = (float(force.x) ** 2 + float(force.z) ** 2) ** 0.5
         positions.append((float(pos.x), float(pos.z)))
         displacements.append((dx * dx + dz * dz) ** 0.5)
         speeds.append((float(vel.x) ** 2 + float(vel.z) ** 2) ** 0.5)
         heights.append(float(pos.y))
-        contact_loads.append(abs(float(body.GetContactForce().y)))
+        contact_loads.append(normal_force)
+        tangential_forces.append(tangential_force)
+        if effective_mu is None or effective_mu <= 0.0:
+            friction_usage.append(0.0)
+        else:
+            friction_usage.append(tangential_force / (effective_mu * normal_force + 1e-6))
 
     total_load = sum(contact_loads)
     if total_load > 1e-9:
@@ -71,6 +82,9 @@ def foot_debug_stats(
         "foot_vxz_max": max(speeds),
         "foot_heights": heights,
         "foot_contact_loads": contact_loads,
+        "foot_normal_forces": contact_loads,
+        "foot_tangential_forces": tangential_forces,
+        "foot_friction_usage": friction_usage,
         "foot_load_shares": load_shares,
         "foot_load_imbalance": load_imbalance,
         "foot_displacements": displacements,

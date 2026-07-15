@@ -3,6 +3,9 @@
 This file gives copy-paste commands for the current Chrono Go1 standing
 workflow.
 
+For the full command lineage from an untrained policy to the current checkpoint,
+see [reproduction_ladder.md](reproduction_ladder.md).
+
 ## Platform
 
 ```text
@@ -52,34 +55,36 @@ Expected result: no runtime-code hits.
 
 ```text
 checkpoint:
-  runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+  runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
 
 required control setup:
   --action-filter-tau 0.05
+  foot_friction = 2.0
 ```
 
-The accepted fixed-0.8 confirmation was:
+The accepted effective `0.5-1.2` confirmation was:
 
 ```text
-episodes: 30
-failure_type_counts: {'nominal': 30}
-survival_rate: 1.000
-settled_base_displacement_from_active_ref: 0.001637 m
-settled_total_contact_foot_slip_distance: 0.003516 m
-settled_total_contact_switches: 0
-settled_min_foot_load: 26.68 N
+slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 30 per slice
+failure_type_counts: {'nominal': 30} on every slice
+survival_rate: 1.000 on every slice
+worst settled_base_displacement_from_active_ref: 0.001558 m
+worst settled_total_contact_foot_slip_distance: 0.003871 m
+settled_total_contact_switches: 0 on every slice
+worst settled_min_foot_load: 28.53 N
 ```
 
 ## View
 
 ```bash
-python view_stand_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --action-filter-tau 0.05
+python view_stand_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 0.5 --friction-max 1.2 --max-steps 5000 --action-filter-tau 0.05
 ```
 
 ## Evaluate
 
 ```bash
-python evaluate_stand.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10 --max-steps 5000 --action-filter-tau 0.05
+python evaluate_stand.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 0.5 --friction-max 1.2 --episodes 10 --max-steps 5000 --action-filter-tau 0.05
 ```
 
 ## Diagnose
@@ -87,65 +92,87 @@ python evaluate_stand.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkp
 One-episode timeline:
 
 ```bash
-python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_fixed08_timeline
-python analyze_slip_timeline.py diagnostics/current_baseline_fixed08_timeline/timeline.csv
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_mu12_timeline
+python analyze_slip_timeline.py diagnostics/current_baseline_mu12_timeline/timeline.csv
 ```
 
 Thirty-episode confirmation:
 
 ```bash
-python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/current_baseline_fixed08_confirm30
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/current_baseline_mu12_confirm30
 ```
 
 Regression wrapper:
 
 ```bash
-python run_regression.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --name current_baseline_fixed08_confirm30 --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
+python run_regression.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --name current_baseline_mu12_confirm30 --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-## Friction Bridge Checks
+## Friction Slice Checks
 
-Before randomized-friction training, run fixed-friction slices around the
-accepted baseline:
+Chrono combines ground and foot friction by `min(ground, foot)` in this SMC
+setup. Foot friction is intentionally set to `2.0` as a cap-removal setting, so
+target ground values through `mu=1.2` are the effective friction values under
+test.
+
+Run one fixed slice:
 
 ```bash
-python friction_curriculum.py bridge-check
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/friction_050_120_cap2_current10k_mu_1p2
 ```
 
-Equivalent manual pattern for one slice:
+Run the full accepted fixed-slice set:
 
 ```bash
-python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.7 --friction-max 0.7 --episodes 10 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/friction_bridge_filtered2k_mu_0p7
+for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
+  SAFE_MU=${MU/./p}
+  python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min "$MU" --friction-max "$MU" --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out "diagnostics/friction_050_120_cap2_current10k_mu_${SAFE_MU}"
+done
 ```
 
-Compare against a candidate once one exists:
+Timeline for a failing slice:
 
 ```bash
-python compare_friction_slices.py --baseline runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --candidate CANDIDATE.zip --name candidate_vs_filtered2k_slices --episodes 10 --max-steps 5000 --mu 0.6 0.7 0.8 0.9 1.0 --action-filter-tau 0.05
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_mu12_timeline
+python analyze_slip_timeline.py diagnostics/current_baseline_mu12_timeline/timeline.csv
 ```
 
-## Training Continuation
+## Fallback Training
 
-The accepted baseline was produced by a conservative 5k fine-tune with the
-action filter enabled. Future standing continuations should keep the filter:
+Training is not needed for the accepted `0.5-1.2` baseline. If a future
+material or reward change breaks any fixed slice, restart from the clean
+filtered fixed fallback with lower LR:
 
 ```bash
 python train_stand.py \
   --load runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip \
-  --save-dir runs/stand_friction_randomized_tau005_from_filtered2k \
+  --save-dir runs/stand_friction_random_050_120_tau005_from_filtered2k_lowlr \
   --terrain flat \
-  --friction-min 0.6 \
-  --friction-max 1.0 \
+  --friction-min 0.5 \
+  --friction-max 1.2 \
   --max-steps 5000 \
-  --timesteps 50000 \
-  --checkpoint-freq 10000 \
-  --learning-rate 0.00005 \
+  --timesteps 20000 \
+  --checkpoint-freq 2000 \
+  --learning-rate 0.000025 \
   --clip-range 0.05 \
-  --target-kl 0.01 \
+  --target-kl 0.005 \
   --action-filter-tau 0.05
 ```
 
-Use shorter bridge tests before committing to long randomized-friction runs.
+Evaluate each checkpoint on fixed slices `0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2`.
+Select by worst-slice behavior, not randomized average reward.
+
+Checkpoint evaluation pattern:
+
+```bash
+for CKPT in runs/stand_friction_random_050_120_tau005_from_filtered2k_lowlr/checkpoints/stand_policy_*_steps.zip; do
+  STEM=$(basename "$CKPT" .zip)
+  for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
+    SAFE_MU=${MU/./p}
+    python diagnose_policy.py "$CKPT" --terrain flat --friction-min "$MU" --friction-max "$MU" --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out "diagnostics/${STEM}_mu_${SAFE_MU}"
+  done
+done
+```
 
 ## Checkpoint Availability
 
@@ -155,7 +182,8 @@ each run's `args.json` and `env_constants.json` with its checkpoint.
 Important local paths:
 
 ```text
-runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip  # current baseline
+runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip # current baseline
+runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip  # clean filtered fixed fallback
 runs/stand_jitter_suppression_from_anchor5_10k/checkpoints/stand_policy_5000_steps.zip    # previous baseline
 runs/stand_fixed_clean_contact2_anchor5_from25k_10k/checkpoints/stand_policy_5000_steps.zip # archived support checkpoint
 runs/stand_friction_ab_065_095/final_model.zip                                           # archived pre-filter friction baseline
@@ -164,7 +192,7 @@ runs/stand_friction_ab_065_095/final_model.zip                                  
 ## Smoke Test
 
 ```bash
-python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/doc_refresh_smoke_tau005
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --friction-min 1.2 --friction-max 1.2 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/doc_refresh_smoke_mu12_tau005
 ```
 
 ## Nominal Load Reference

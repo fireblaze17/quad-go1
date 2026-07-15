@@ -196,6 +196,16 @@ def _empty_window_summary() -> dict[str, Any]:
         "mean_tilt_error": 0.0,
         "min_foot_load": 0.0,
         "foot_load_shares": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_tangential_force_mean": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_tangential_force_max": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_mean": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_max": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_above_0p5_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_above_0p7_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_above_0p9_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "foot_friction_usage_above_1p0_frames": {leg: 0.0 for leg in LEG_PREFIXES},
+        "max_foot_friction_usage": 0.0,
+        "worst_friction_usage_foot": "",
         "contact_duty": {leg: 0.0 for leg in LEG_PREFIXES},
         "contact_switches": {leg: 0 for leg in LEG_PREFIXES},
         "contact_foot_slip_distance": {leg: 0.0 for leg in LEG_PREFIXES},
@@ -276,6 +286,16 @@ def _window_summary(
         "foot_load_below_5n_frames": {},
     }
     load_shares = {}
+    tangential_force_mean = {}
+    tangential_force_max = {}
+    friction_usage_mean = {}
+    friction_usage_max = {}
+    usage_above_frames = {
+        "foot_friction_usage_above_0p5_frames": {},
+        "foot_friction_usage_above_0p7_frames": {},
+        "foot_friction_usage_above_0p9_frames": {},
+        "foot_friction_usage_above_1p0_frames": {},
+    }
     min_foot_load = float("inf")
     for index, leg in enumerate(LEG_PREFIXES):
         contacts = [item["contacts"][index] for item in records]
@@ -292,6 +312,24 @@ def _window_summary(
         for key in below_count_maps:
             below_count_maps[key][leg] = float(final[key][leg])
         load_shares[leg] = float(np.mean([item["foot_load_shares"][index] for item in records]))
+        tangential_values = [item["foot_tangential_forces"][index] for item in records]
+        usage_values = [item["foot_friction_usage"][index] for item in records]
+        tangential_force_mean[leg] = float(np.mean(tangential_values))
+        tangential_force_max[leg] = float(max(tangential_values, default=0.0))
+        friction_usage_mean[leg] = float(np.mean(usage_values))
+        friction_usage_max[leg] = float(max(usage_values, default=0.0))
+        usage_above_frames["foot_friction_usage_above_0p5_frames"][leg] = float(
+            sum(value > 0.5 for value in usage_values)
+        )
+        usage_above_frames["foot_friction_usage_above_0p7_frames"][leg] = float(
+            sum(value > 0.7 for value in usage_values)
+        )
+        usage_above_frames["foot_friction_usage_above_0p9_frames"][leg] = float(
+            sum(value > 0.9 for value in usage_values)
+        )
+        usage_above_frames["foot_friction_usage_above_1p0_frames"][leg] = float(
+            sum(value > 1.0 for value in usage_values)
+        )
         min_foot_load = min(min_foot_load, min(item["foot_loads"][index] for item in records))
 
     action_leg_means = _leg_action_means(np.mean(np.abs(actions), axis=0))
@@ -323,6 +361,13 @@ def _window_summary(
         "mean_tilt_error": float(np.mean(tilt_error)),
         "min_foot_load": 0.0 if min_foot_load == float("inf") else float(min_foot_load),
         "foot_load_shares": load_shares,
+        "foot_tangential_force_mean": tangential_force_mean,
+        "foot_tangential_force_max": tangential_force_max,
+        "foot_friction_usage_mean": friction_usage_mean,
+        "foot_friction_usage_max": friction_usage_max,
+        "max_foot_friction_usage": float(max(friction_usage_max.values(), default=0.0)),
+        "worst_friction_usage_foot": max(friction_usage_max, key=friction_usage_max.get, default=""),
+        **usage_above_frames,
         "contact_duty": contact_duty,
         "contact_switches": contact_switches,
         "total_contact_switches": int(sum(contact_switches.values())),
@@ -462,6 +507,8 @@ def _timeline_row(
     foot_shares = _foot_map(foot_stats["foot_load_shares"])
     foot_speeds = _foot_map(foot_stats["foot_speeds"])
     foot_displacements = _foot_map(foot_stats["foot_displacements"])
+    foot_tangential_forces = _foot_map(foot_stats["foot_tangential_forces"])
+    foot_friction_usage = _foot_map(foot_stats["foot_friction_usage"])
     foot_positions = {
         name.split("_")[0]: [float(position[0]), float(position[1])]
         for name, position in zip(FOOT_BODY_NAMES, foot_stats["foot_positions"])
@@ -513,8 +560,11 @@ def _timeline_row(
         "foot_dxz_max": foot_stats["foot_dxz_max"],
         "foot_vxz_max": foot_stats["foot_vxz_max"],
         "foot_load_imbalance": foot_stats["foot_load_imbalance"],
+        "max_foot_friction_usage": max(foot_stats["foot_friction_usage"], default=0.0),
         "foot_loads": json.dumps(foot_loads, sort_keys=True),
         "foot_shares": json.dumps(foot_shares, sort_keys=True),
+        "foot_tangential_forces": json.dumps(foot_tangential_forces, sort_keys=True),
+        "foot_friction_usage": json.dumps(foot_friction_usage, sort_keys=True),
         "foot_speeds": json.dumps(foot_speeds, sort_keys=True),
         "foot_displacements": json.dumps(foot_displacements, sort_keys=True),
         "foot_positions": json.dumps(foot_positions, sort_keys=True),
@@ -635,6 +685,9 @@ def diagnose_episode(
 ) -> dict[str, Any]:
     obs, info = env.reset()
     friction = float(info["ground_friction"])
+    material_properties = info.get("material_properties", {})
+    effective_friction = material_properties.get("effective_friction", info.get("effective_friction", friction))
+    effective_friction = None if effective_friction is None else float(effective_friction)
     tracked_feet = foot_bodies(env)
     tracked_contacts = contact_body_groups(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
@@ -671,6 +724,7 @@ def diagnose_episode(
         "max_foot_anchor_error": 0.0,
         "max_foot_anchor_resets": 0.0,
         "max_foot_anchor_deactivations": 0.0,
+        "max_foot_friction_usage": 0.0,
         "min_foot_load": float("inf"),
         "min_upright_score": float("inf"),
     }
@@ -722,7 +776,7 @@ def diagnose_episode(
         total_reward += float(reward)
         done = bool(terminated or truncated)
         terms = info.get("reward_terms", {})
-        foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz)
+        foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz, effective_friction)
         contact_stats = contact_debug_stats(tracked_contacts)
         foot_loads = foot_stats["foot_contact_loads"]
         contacts = [float(load) > args.unload_threshold for load in foot_loads]
@@ -771,6 +825,10 @@ def diagnose_episode(
             max_values["max_foot_anchor_deactivations"],
             float(terms.get("foot_anchor_total_deactivations", 0.0)),
         )
+        max_values["max_foot_friction_usage"] = max(
+            max_values["max_foot_friction_usage"],
+            float(max(foot_stats["foot_friction_usage"], default=0.0)),
+        )
         max_values["min_foot_load"] = min(max_values["min_foot_load"], float(min(foot_loads)))
         max_values["min_upright_score"] = min(
             max_values["min_upright_score"],
@@ -799,6 +857,8 @@ def diagnose_episode(
             "tilt_error": float(terms.get("tilt_error", 0.0)),
             "foot_loads": [float(value) for value in foot_stats["foot_contact_loads"]],
             "foot_load_shares": [float(value) for value in foot_stats["foot_load_shares"]],
+            "foot_tangential_forces": [float(value) for value in foot_stats["foot_tangential_forces"]],
+            "foot_friction_usage": [float(value) for value in foot_stats["foot_friction_usage"]],
             "foot_displacements": [float(value) for value in foot_stats["foot_displacements"]],
             "foot_anchor_active": _term_foot_map(terms, "foot_anchor_active"),
             "foot_anchor_displacement": _term_foot_map(terms, "foot_anchor_displacement"),
@@ -865,6 +925,8 @@ def diagnose_episode(
         "truncated": bool(truncated),
         "termination_reason": info.get("termination_reason") or ("truncated" if truncated else "unknown"),
         "friction": friction,
+        "effective_friction": effective_friction,
+        "material_properties": material_properties,
         "freeze_action": {
             "enabled": args.freeze_after_steps is not None,
             "freeze_step": args.freeze_after_steps,
@@ -908,6 +970,10 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
     windows = [item["windows"][window_name] for item in episodes if window_name in item.get("windows", {})]
     if not windows:
         return _empty_window_summary()
+    aggregate_friction_usage_max = _mean_dict_values(
+        [window["foot_friction_usage_max"] for window in windows],
+        LEG_PREFIXES,
+    )
     scalar_keys = (
         "mean_lin_vel_x",
         "mean_lin_vel_z",
@@ -926,6 +992,7 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "mean_abs_trunk_y_up",
         "mean_tilt_error",
         "min_foot_load",
+        "max_foot_friction_usage",
         "total_contact_switches",
         "total_contact_foot_slip_distance",
         "max_foot_world_displacement",
@@ -951,6 +1018,43 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "foot_load_shares": _mean_dict_values(
             [window["foot_load_shares"] for window in windows],
             LEG_PREFIXES,
+        ),
+        "foot_tangential_force_mean": _mean_dict_values(
+            [window["foot_tangential_force_mean"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_tangential_force_max": _mean_dict_values(
+            [window["foot_tangential_force_max"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_mean": _mean_dict_values(
+            [window["foot_friction_usage_mean"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_max": _mean_dict_values(
+            [window["foot_friction_usage_max"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_above_0p5_frames": _mean_dict_values(
+            [window["foot_friction_usage_above_0p5_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_above_0p7_frames": _mean_dict_values(
+            [window["foot_friction_usage_above_0p7_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_above_0p9_frames": _mean_dict_values(
+            [window["foot_friction_usage_above_0p9_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "foot_friction_usage_above_1p0_frames": _mean_dict_values(
+            [window["foot_friction_usage_above_1p0_frames"] for window in windows],
+            LEG_PREFIXES,
+        ),
+        "worst_friction_usage_foot": max(
+            aggregate_friction_usage_max,
+            key=aggregate_friction_usage_max.get,
+            default="",
         ),
         "contact_duty": _mean_dict_values(
             [window["contact_duty"] for window in windows],
@@ -1038,6 +1142,7 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
                 "total_contact_foot_slip_distance",
                 "total_contact_switches",
                 "max_foot_anchor_displacement",
+                "max_foot_friction_usage",
                 "total_foot_anchor_deactivations",
                 "mean_abs_executed_action_delta",
                 "max_abs_executed_action_delta",
@@ -1068,6 +1173,10 @@ def _episode_replay_metadata(item: dict[str, Any], metric: str, value: float) ->
             "total_contact_switches": settled.get("total_contact_switches"),
             "min_foot_load": settled.get("min_foot_load"),
             "foot_load_shares": settled.get("foot_load_shares"),
+            "foot_friction_usage_mean": settled.get("foot_friction_usage_mean"),
+            "foot_friction_usage_max": settled.get("foot_friction_usage_max"),
+            "max_foot_friction_usage": settled.get("max_foot_friction_usage"),
+            "worst_friction_usage_foot": settled.get("worst_friction_usage_foot"),
             "foot_anchor_active_duty": settled.get("foot_anchor_active_duty"),
             "foot_anchor_reset_count": settled.get("foot_anchor_reset_count"),
             "foot_anchor_deactivate_count": settled.get("foot_anchor_deactivate_count"),
@@ -1121,10 +1230,17 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
     lengths = [item["steps"] for item in episodes]
     rewards = [item["reward"] for item in episodes]
     max_values = [item["max_values"] for item in episodes]
+    material_properties = episodes[0].get("material_properties", {}) if episodes else {}
+    effective_frictions = [
+        item["effective_friction"]
+        for item in episodes
+        if item.get("effective_friction") is not None
+    ]
     return _json_ready({
         "policy": str(args.policy),
         "terrain": args.terrain,
         "friction_range": [args.friction_min, args.friction_max],
+        "material_properties": material_properties,
         "freeze_action": {
             "enabled": args.freeze_after_steps is not None,
             "freeze_step": args.freeze_after_steps,
@@ -1145,6 +1261,8 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
         "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
         "friction_min_seen": min((item["friction"] for item in episodes), default=None),
         "friction_max_seen": max((item["friction"] for item in episodes), default=None),
+        "effective_friction_min_seen": min(effective_frictions, default=None),
+        "effective_friction_max_seen": max(effective_frictions, default=None),
         "cause_counts": cause_counts,
         "failure_type_counts": failure_type_counts,
         "final_tilt_directions": tilt_directions,
@@ -1167,6 +1285,10 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
             "max_foot_anchor_resets": max((item["max_foot_anchor_resets"] for item in max_values), default=0.0),
             "max_foot_anchor_deactivations": max(
                 (item["max_foot_anchor_deactivations"] for item in max_values),
+                default=0.0,
+            ),
+            "max_foot_friction_usage": max(
+                (item["max_foot_friction_usage"] for item in max_values),
                 default=0.0,
             ),
             "max_nonfoot_load": max((item["max_nonfoot_load"] for item in max_values), default=0.0),
@@ -1200,6 +1322,9 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     print(f"mean_reward: {aggregate['mean_reward']:.3f}")
     print(f"friction_min_seen: {aggregate['friction_min_seen']:.3f}")
     print(f"friction_max_seen: {aggregate['friction_max_seen']:.3f}")
+    if aggregate.get("effective_friction_min_seen") is not None:
+        print(f"effective_friction_min_seen: {aggregate['effective_friction_min_seen']:.3f}")
+        print(f"effective_friction_max_seen: {aggregate['effective_friction_max_seen']:.3f}")
     if aggregate.get("freeze_action", {}).get("enabled"):
         freeze = aggregate["freeze_action"]
         print(
@@ -1233,6 +1358,7 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
         "total_contact_foot_slip_distance",
         "total_contact_switches",
         "min_foot_load",
+        "max_foot_friction_usage",
         "max_foot_anchor_displacement",
         "total_foot_anchor_resets",
         "total_foot_anchor_deactivations",

@@ -17,6 +17,7 @@ from pathlib import Path
 from project_config import (
     CURRENT_BASELINE_MODEL,
     DEFAULT_ACTION_FILTER_TAU,
+    FILTERED_FIXED_MODEL,
     FIXED_BASELINE_DIR,
     FIXED_BASELINE_MODEL,
     FRICTION_AB_DIR,
@@ -87,7 +88,7 @@ def fixed_clean_train_command() -> list[str]:
 
 def friction_bridge_commands() -> list[list[str]]:
     commands = []
-    for mu in (0.6, 0.7, 0.8, 0.9, 1.0):
+    for mu in (0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2):
         commands.append([
             _python(),
             "diagnose_policy.py",
@@ -99,13 +100,38 @@ def friction_bridge_commands() -> list[list[str]]:
             "--friction-max",
             str(mu),
             "--episodes",
-            "10",
+            "30",
             "--max-steps",
             "5000",
             "--action-filter-tau",
             str(DEFAULT_ACTION_FILTER_TAU),
             "--out",
-            f"diagnostics/friction_bridge_filtered2k_mu_{mu:.1f}".replace(".", "p"),
+            f"diagnostics/friction_slice_current10k_mu_{mu:.1f}".replace(".", "p"),
+        ])
+    return commands
+
+
+def friction_bridge_stress_commands() -> list[list[str]]:
+    commands = []
+    for mu in (0.45, 1.3):
+        commands.append([
+            _python(),
+            "diagnose_policy.py",
+            _path(CURRENT_BASELINE_MODEL),
+            "--terrain",
+            "flat",
+            "--friction-min",
+            str(mu),
+            "--friction-max",
+            str(mu),
+            "--episodes",
+            "30",
+            "--max-steps",
+            "5000",
+            "--action-filter-tau",
+            str(DEFAULT_ACTION_FILTER_TAU),
+            "--out",
+            f"diagnostics/friction_stress_current10k_mu_{mu:.2f}".replace(".", "p"),
         ])
     return commands
 
@@ -117,25 +143,25 @@ def friction_randomization_train_command() -> list[str]:
         "--terrain",
         "flat",
         "--friction-min",
-        "0.6",
+        "0.5",
         "--friction-max",
-        "1.0",
+        "1.2",
         "--load",
-        _path(CURRENT_BASELINE_MODEL),
+        _path(FILTERED_FIXED_MODEL),
         "--save-dir",
-        "runs/stand_friction_randomized_tau005_from_filtered2k",
+        "runs/stand_friction_random_050_120_tau005_from_filtered2k_lowlr",
         "--timesteps",
-        "50000",
+        "20000",
         "--seed",
         "1",
         "--checkpoint-freq",
-        "10000",
+        "2000",
         "--learning-rate",
-        "0.00005",
+        "0.000025",
         "--clip-range",
         "0.05",
         "--target-kl",
-        "0.01",
+        "0.005",
         "--action-filter-tau",
         str(DEFAULT_ACTION_FILTER_TAU),
     ]
@@ -249,6 +275,7 @@ def parse_args() -> argparse.Namespace:
             "all-commands",
             "fixed-clean",
             "bridge-check",
+            "bridge-stress",
             "friction-randomization",
         ],
     )
@@ -285,15 +312,25 @@ def main() -> None:
             run_or_print(command, args.run)
         return
 
+    if args.action == "bridge-stress":
+        for command in friction_bridge_stress_commands():
+            run_or_print(command, args.run)
+        return
+
     if args.action == "friction-randomization":
+        print("# Fallback only: current 0.5-1.2 baseline is already accepted.")
+        print("# Run this only if a future material/reward change breaks fixed slices.")
         run_or_print(friction_randomization_train_command(), args.run)
         return
 
     if args.action == "all-commands":
-        print("# Current filtered-baseline bridge checks")
+        print("# Current accepted-baseline fixed-slice checks")
         for command in friction_bridge_commands():
             print_command(command)
-        print("\n# First friction-randomization continuation after bridge checks pass")
+        print("\n# Optional outside-range stress checks")
+        for command in friction_bridge_stress_commands():
+            print_command(command)
+        print("\n# Fallback low-LR friction randomization if future fixed slices regress")
         print_command(friction_randomization_train_command())
         print("\n# Archived pre-filter friction-A helper commands")
         print_command([_python(), "friction_curriculum.py", "prepare-base"])

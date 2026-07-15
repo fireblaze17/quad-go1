@@ -7,9 +7,11 @@ Git history records what was tried. These notes record the current rational
 state.
 
 Current standing-policy experiments are documented in
-[training_roadmap.md](training_roadmap.md) and
-[experiments/friction_curriculum.md](experiments/friction_curriculum.md). This
-file stays focused on Chrono import, contact, reset, and physics decisions.
+[training_roadmap.md](training_roadmap.md),
+[reproduction_ladder.md](reproduction_ladder.md), and
+[experiments/fixed_friction_standing.md](experiments/fixed_friction_standing.md).
+This file stays focused on Chrono import, contact, reset, and physics
+decisions.
 
 ---
 
@@ -142,7 +144,7 @@ system.GetSolver().AsIterative().SetMaxIterations(60)
 Flat-ground material:
 
 ```text
-friction:     per-episode friction range, currently fixed at 0.8
+friction:     per-episode friction range
 restitution: 0.1
 Kn:          2e5
 Gn:          60.0
@@ -151,7 +153,7 @@ Gn:          60.0
 Foot material override after URDF import:
 
 ```text
-friction:     0.9
+friction:     2.0
 restitution: 0.01
 Gn:          60.0
 ```
@@ -159,10 +161,18 @@ Gn:          60.0
 Foot material is applied directly to each foot collision model with
 `GetCollisionModel().SetAllShapesMaterial(...)`.
 
+Chrono's SMC material composition uses the minimum friction of the two contact
+materials. Foot friction was historically `0.9`, which capped all higher ground
+friction values at effective `0.9`. It is now intentionally set to `2.0` so
+ground slices through `mu=1.2` are not capped by the foot material. This is a
+cap-removal modeling choice, not a measured Unitree Go1 foot material.
+
 **Consequences and tradeoffs:**
 
 - More stable and intentional for rigid contact.
 - Ground friction can still be randomized through `friction_range`.
+- Effective friction is `min(ground_friction, foot_friction)` in the active SMC
+  setup.
 - This is not a full clone of the MaGIC tutorial. This project uses Go1, a
   different reward stack, and standing-first training.
 - Contact-force rewards and diagnostics should be rechecked when moving to SCM.
@@ -388,6 +398,10 @@ foot_contact_penalty = 0.10 * mean(missing_foot_load**2)
 - Does not require equal world foot height.
 - Must be revisited on SCM if soil contact force magnitudes change
   significantly.
+
+**Current note:** later reward cleanup raised the active foot-contact penalty to
+`2.00`. This ADR explains why contact-force support was introduced; see
+`go1_env.py` and `docs/reproduction_ladder.md` for current weights.
 
 ---
 

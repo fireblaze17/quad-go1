@@ -6,28 +6,30 @@ summarizes what is currently believed and what should happen next.
 
 ## Current Direction
 
-Fixed-friction flat standing at `mu=0.8` is accepted with the filtered-control
-baseline:
+Randomized-friction flat standing is accepted over effective `mu=0.5-1.2` with
+the filtered-control baseline:
 
 ```text
-runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip
+runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
 action_filter_tau = 0.05
+foot_friction = 2.0
 ```
 
-The accepted 30-episode, 5000-step fixed-0.8 confirmation:
+The accepted 30-episode, 5000-step fixed-slice confirmation:
 
 ```text
-failure_type_counts: {'nominal': 30}
-survival_rate: 1.000
-active-reference drift: 0.001637 m
-settled total contact foot slip: 0.003516 m
-settled total contact switches: 0
-settled min foot load: 26.68 N
+slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+failure_type_counts: {'nominal': 30} on every slice
+survival_rate: 1.000 on every slice
+worst active-reference drift: 0.001558 m
+worst settled contact foot slip: 0.003871 m
+settled contact switches: 0 on every slice
+worst settled min foot load: 28.53 N
+max settled friction usage: 0.01833
 ```
 
-Next work is not another fixed-0.8 reward change. The next step is bridge
-testing at nearby fixed frictions, then randomized-friction fine-tuning if the
-bridge checks remain clean.
+No extra training was needed after raising foot friction to `2.0`; the current
+randomized 10k checkpoint already passed the full effective `0.5-1.2` gate.
 
 ## Active Reward And Control
 
@@ -82,6 +84,8 @@ For the accepted baseline, `tau=0.05` and `dt=0.002`, so `alpha=0.038462`.
 
 The detailed ADR-style log is in
 [experiments/fixed_friction_standing.md](experiments/fixed_friction_standing.md).
+The closest command-by-command reproduction path is in
+[reproduction_ladder.md](reproduction_ladder.md).
 The short version:
 
 ```text
@@ -94,6 +98,8 @@ normalized foot slip 0.05           rejected
 stance-shape 0.05 and 0.005         rejected
 eval-only action filter sweep        accepted; tau=0.05 smallest clean tau
 filtered fine-tune                   accepted; 2k checkpoint promoted
+friction randomization 0.6-0.9       accepted; 10k checkpoint promoted
+foot friction 2.0 cap removal        accepted; 0.5-1.2 passed without training
 ```
 
 Important negative lesson: stronger stationarity rewards were less effective
@@ -106,9 +112,9 @@ contacts.
 Use filtered-control diagnostics for all current baseline checks:
 
 ```bash
-python diagnose_policy.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_fixed08_timeline
-python analyze_slip_timeline.py diagnostics/current_baseline_fixed08_timeline/timeline.csv
-python run_regression.py runs/stand_action_filter_tau005_from_jitter5k_5k/checkpoints/stand_policy_2000_steps.zip --name current_baseline_fixed08_confirm30 --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_mu12_timeline
+python analyze_slip_timeline.py diagnostics/current_baseline_mu12_timeline/timeline.csv
+python run_regression.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --name current_baseline_mu12_confirm30 --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
 ```
 
 Acceptance signals:
@@ -127,39 +133,61 @@ viewer drift/slip/contact behavior
 
 ## Next Experiment
 
-Run fixed-friction bridge checks before randomized training:
+Chrono's default SMC material composition combines two contact frictions with
+`min(ground, foot)`. The active foot friction is now intentionally set to `2.0`
+as a cap-removal setting, not a measured Go1 value. For target ground values
+through `mu=1.2`, effective friction equals ground friction.
 
-```bash
-python friction_curriculum.py bridge-check
+The fixed-slice gate already passed for the current randomized checkpoint:
+
+```text
+checkpoint: runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
+slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 30 per slice
+result: nominal on every episode
 ```
 
-Recommended bridge acceptance:
+Future work should add the next robustness axis one at a time, starting from
+this checkpoint and keeping `action_filter_tau=0.05`:
+
+```text
+1. reset-state noise
+2. observation noise
+3. terrain variation
+4. actuator/model randomization
+```
+
+Before accepting any new checkpoint, re-run fixed effective-friction slices:
+
+```bash
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/current_baseline_mu12_confirm30
+```
+
+Recommended acceptance:
 
 ```text
 each tested mu reaches max_steps
 active-reference drift <= 0.03 m
 settled contact switches = 0 preferred
 settled min foot load near or above 20 N
+settled loaded-foot slip remains low
+friction_usage stays comfortably below 1.0
 no repeated foot_slip / one_foot_creep / all_feet_creep classification
 viewer shows no obvious sliding
 ```
 
-If bridge checks pass, continue with conservative PPO from the filtered
-baseline:
-
-```bash
-python friction_curriculum.py friction-randomization
-```
-
-Keep `--action-filter-tau 0.05` during continuation. Treat it as part of the
-actuator/control stack unless an explicit ablation is being run.
+Promote future checkpoints by worst fixed-slice behavior, not by average
+randomized reward. Stop or reject a run if fixed `mu=0.8` regresses, contact
+switches return, loaded-foot slip grows, or friction usage repeatedly
+approaches/exceeds `1.0`.
 
 ## Historical Notes
 
 - `docs/experiments/friction_curriculum.md` records the old A/AB/C curriculum.
   Those policies are archived pre-filter evidence, not current baselines.
 - `docs/experiments/standing_v2.md` is a historical fixed-friction model card.
-- Reset-noise experiments remain archived evidence only. They should not resume
-  until filtered standing is tested across friction.
+- Reset-noise experiments are the next likely robustness axis, but they should
+  start from the current randomized 10k baseline and be accepted only after
+  fixed-slice checks remain clean.
 - `nominal_load_sanity.py` was removed after its useful load reference was
   documented.

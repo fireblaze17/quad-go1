@@ -34,6 +34,15 @@ _TIME_STEP = 0.002
 _TERRAIN_LENGTH = 6.0
 _TERRAIN_WIDTH = 4.0
 _TERRAIN_DELTA = 0.04
+_GROUND_RESTITUTION = 0.1
+_GROUND_KN = 2e5
+_GROUND_GN = 60.0
+_GROUND_ROLLING_FRICTION = 0.0001
+_FOOT_FRICTION = 2.0
+_FOOT_RESTITUTION = 0.01
+_FOOT_GN = 60.0
+_CONTACT_METHOD = "SMC"
+_MATERIAL_COMPOSITION_RULE = "min"
 
 # Zero-action diagnostics showed the original Menagerie crouch
 # (hip=0, thigh=0.9, calf=-1.8 at y=0.27) slowly sank in Chrono. This less
@@ -138,16 +147,21 @@ def standing_env_metadata() -> dict:
             "max_iterations": 60,
         },
         "contact_materials": {
+            "contact_method": _CONTACT_METHOD,
+            "composition_rule": _MATERIAL_COMPOSITION_RULE,
+            "effective_friction": "min(flat_ground.friction, feet.friction)",
+            "static_sliding_note": "SetFriction sets Chrono's friction value used for both static/sliding contact in this setup.",
             "flat_ground": {
                 "friction": "sampled from friction_range",
-                "restitution": 0.1,
-                "Kn": 2e5,
-                "Gn": 60.0,
+                "restitution": _GROUND_RESTITUTION,
+                "Kn": _GROUND_KN,
+                "Gn": _GROUND_GN,
+                "rolling_friction": _GROUND_ROLLING_FRICTION,
             },
             "feet": {
-                "friction": 0.9,
-                "restitution": 0.01,
-                "Gn": 60.0,
+                "friction": _FOOT_FRICTION,
+                "restitution": _FOOT_RESTITUTION,
+                "Gn": _FOOT_GN,
             },
         },
     }
@@ -332,16 +346,15 @@ class Go1Env(gym.Env):
         return terrain
 
     def _add_flat_ground(self, system) -> None:
-        # Sampled flat-ground friction is the first domain-randomization knob.
-        # Foot friction stays at the Go1 reference value; only the floor material
-        # changes from episode to episode.
+        # Sampled flat-ground friction is the domain-randomization knob. Foot
+        # friction is set high enough that it does not cap the target range.
         ground_mat = _magic_contact_material(
             friction=self.ground_friction,
-            restitution=0.1,
-            gn=60.0,
-            kn=2e5,
+            restitution=_GROUND_RESTITUTION,
+            gn=_GROUND_GN,
+            kn=_GROUND_KN,
         )
-        ground_mat.SetRollingFriction(0.0001)
+        ground_mat.SetRollingFriction(_GROUND_ROLLING_FRICTION)
 
         ground = chrono.ChBodyEasyBox(10, 0.2, 10, 1000, True, True, ground_mat)
         ground.SetFixed(True)
@@ -386,9 +399,9 @@ class Go1Env(gym.Env):
                 body.EnableCollision(True)
 
         foot_mat = _magic_contact_material(
-            friction=0.9,
-            restitution=0.01,
-            gn=60.0,
+            friction=_FOOT_FRICTION,
+            restitution=_FOOT_RESTITUTION,
+            gn=_FOOT_GN,
         )
         for name in ("FR_foot", "FL_foot", "RR_foot", "RL_foot"):
             body = parser.GetChBody(name)
@@ -865,11 +878,43 @@ class Go1Env(gym.Env):
         info["termination_reason"] = termination_reason
         return obs, reward, terminated, truncated, info
 
+    def _material_info(self) -> dict:
+        effective_friction = None
+        if self.ground_friction is not None:
+            effective_friction = min(float(self.ground_friction), _FOOT_FRICTION)
+        return {
+            "contact_method": _CONTACT_METHOD,
+            "material_composition_rule": _MATERIAL_COMPOSITION_RULE,
+            "composition_strategy": "ChContactMaterialCompositionStrategy::CombineFriction",
+            "configured_ground_friction": None if self.ground_friction is None else float(self.ground_friction),
+            "configured_foot_friction": _FOOT_FRICTION,
+            "effective_friction": effective_friction,
+            "static_friction": effective_friction,
+            "sliding_friction": effective_friction,
+            "static_sliding_note": "Current SetFriction calls use the same Chrono friction value for static/sliding contact.",
+            "ground": {
+                "friction": None if self.ground_friction is None else float(self.ground_friction),
+                "restitution": _GROUND_RESTITUTION,
+                "Kn": _GROUND_KN,
+                "Gn": _GROUND_GN,
+                "rolling_friction": _GROUND_ROLLING_FRICTION,
+            },
+            "feet": {
+                "friction": _FOOT_FRICTION,
+                "restitution": _FOOT_RESTITUTION,
+                "Gn": _FOOT_GN,
+            },
+        }
+
     def _info(self) -> dict:
+        material_info = self._material_info()
         return {
             "terrain": self.terrain_type,
             "ground_friction": self.ground_friction,
+            "foot_friction": _FOOT_FRICTION,
+            "effective_friction": material_info["effective_friction"],
             "friction_range": self.friction_range,
+            "material_properties": material_info,
         }
 
     def render(self) -> bool:
