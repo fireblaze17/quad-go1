@@ -21,13 +21,15 @@ from diagnostics import (
     foot_xz_positions,
 )
 from go1_env import Go1Env, _TIME_STEP
-from project_config import SB3_DEVICE
+from project_config import DEFAULT_ACTION_FILTER_TAU, SB3_DEVICE
 
 
 _LOAD_IMBALANCE_THRESHOLD = 0.25
 _SLIP_THRESHOLD = 0.05
 _ACTION_BIAS_THRESHOLD = 0.12
 _JOINT_BIAS_THRESHOLD = 0.005
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
 
 
 def parse_args():
@@ -39,6 +41,11 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--out", type=Path, required=True, help="Output directory.")
+    parser.add_argument("--spawn-x", type=float, default=0.0)
+    parser.add_argument("--spawn-z", type=float, default=0.0)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument(
         "--tilt-threshold",
         type=float,
@@ -85,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--action-filter-tau",
         type=float,
-        default=None,
-        help="Optional eval-only action low-pass filter time constant in seconds.",
+        default=DEFAULT_ACTION_FILTER_TAU,
+        help="Eval-only action low-pass filter time constant in seconds.",
     )
     args = parser.parse_args()
     if args.freeze_after_steps is not None and args.freeze_after_steps <= 0:
@@ -170,7 +177,7 @@ def _max_pair_delta(pair_sums: dict[str, float]) -> float:
 
 
 def _yaw_from_obs(obs: np.ndarray) -> float:
-    qw, qx, qy, qz = (float(value) for value in obs[3:7])
+    qw, qx, qy, qz = (float(value) for value in obs[1:5])
     forward_x = 1.0 - 2.0 * (qy * qy + qz * qz)
     forward_z = 2.0 * (qx * qz - qw * qy)
     return float(np.arctan2(forward_z, forward_x))
@@ -187,6 +194,11 @@ def _empty_window_summary() -> dict[str, Any]:
         "mean_lin_vel_z": 0.0,
         "mean_abs_xz_vel": 0.0,
         "mean_xz_speed": 0.0,
+        "mean_base_world_y": 0.0,
+        "mean_base_relative_height": 0.0,
+        "min_base_relative_height": 0.0,
+        "ground_top_y": 0.0,
+        "ground_height_offset": 0.0,
         "base_displacement_from_reset": 0.0,
         "yaw_drift_from_reset": 0.0,
         "mean_trunk_x_up": 0.0,
@@ -240,6 +252,8 @@ def _empty_window_summary() -> dict[str, Any]:
         "mean_abs_executed_action_delta": 0.0,
         "max_abs_executed_action_delta": 0.0,
         "executed_action_rate_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
+        "mean_filter_lag": 0.0,
+        "max_filter_lag": 0.0,
         "joint_error_from_nominal": 0.0,
     }
 
@@ -259,15 +273,20 @@ def _window_summary(
     trunk_x_up = np.array([item["trunk_x_up"] for item in records], dtype=np.float64)
     trunk_y_up = np.array([item["trunk_y_up"] for item in records], dtype=np.float64)
     tilt_error = np.array([item["tilt_error"] for item in records], dtype=np.float64)
+    base_world_y = np.array([item["base_world_y"] for item in records], dtype=np.float64)
+    base_relative_height = np.array([item["base_relative_height"] for item in records], dtype=np.float64)
     actions = np.stack([item["action"] for item in records]).astype(np.float64)
     raw_actions = np.stack([item["raw_action"] for item in records]).astype(np.float64)
     executed_actions = np.stack([item["executed_action"] for item in records]).astype(np.float64)
     raw_action_deltas = np.stack([item["raw_action_delta"] for item in records]).astype(np.float64)
     executed_action_deltas = np.stack([item["executed_action_delta"] for item in records]).astype(np.float64)
+    filter_lags = np.stack([item["filter_lag"] for item in records]).astype(np.float64)
     joints = np.stack([item["joint_pos"] for item in records]).astype(np.float64)
     final = records[-1]
-    base_dx = float(final["base_x"] - reset_base_xz[0])
-    base_dz = float(final["base_z"] - reset_base_xz[1])
+    reset_base_x = float(final.get("base_reset_x", reset_base_xz[0]))
+    reset_base_z = float(final.get("base_reset_z", reset_base_xz[1]))
+    base_dx = float(final["base_x"] - reset_base_x)
+    base_dz = float(final["base_z"] - reset_base_z)
 
     contact_duty = {}
     contact_switches = {}
@@ -345,6 +364,11 @@ def _window_summary(
         "mean_lin_vel_z": float(np.mean(lin_z)),
         "mean_abs_xz_vel": float(np.mean(np.abs(np.column_stack([lin_x, lin_z])))),
         "mean_xz_speed": float(np.mean(xz_speed)),
+        "mean_base_world_y": float(np.mean(base_world_y)),
+        "mean_base_relative_height": float(np.mean(base_relative_height)),
+        "min_base_relative_height": float(np.min(base_relative_height)),
+        "ground_top_y": float(final["ground_top_y"]),
+        "ground_height_offset": float(final["ground_height_offset"]),
         "base_displacement_from_reset": float((base_dx * base_dx + base_dz * base_dz) ** 0.5),
         "base_dx_from_reset": base_dx,
         "base_dz_from_reset": base_dz,
@@ -404,6 +428,8 @@ def _window_summary(
         "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_deltas))),
         "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_deltas))),
         "executed_action_rate_per_leg": executed_action_rate_per_leg,
+        "mean_filter_lag": float(np.mean(np.abs(filter_lags))),
+        "max_filter_lag": float(np.max(np.abs(filter_lags))),
         "joint_error_from_nominal": float(np.mean((joints - home_joint_angles) ** 2)),
     }
 
@@ -529,8 +555,8 @@ def _timeline_row(
         "episode": episode,
         "step": step,
         "friction": friction,
-        "base_x": float(obs[0]),
-        "base_z": float(obs[2]),
+        "base_x": float(terms.get("base_world_x", 0.0)),
+        "base_z": float(terms.get("base_world_z", 0.0)),
         "base_ref_x": terms.get("base_ref_x", 0.0),
         "base_ref_z": terms.get("base_ref_z", 0.0),
         "base_reset_x": terms.get("base_reset_x", 0.0),
@@ -539,12 +565,26 @@ def _timeline_row(
         "base_drift_from_reset": terms.get("base_drift_from_reset", 0.0),
         "standing_reference_captured": terms.get("standing_reference_captured", 0.0),
         "trunk_y": terms.get("trunk_y", 0.0),
+        "base_world_y": terms.get("base_world_y", 0.0),
+        "base_relative_height": terms.get("base_relative_height", 0.0),
+        "ground_top_y": terms.get("ground_top_y", 0.0),
+        "ground_height_offset": terms.get("ground_height_offset", 0.0),
         "upright_score": terms.get("upright_score", 0.0),
         "trunk_x_up": terms.get("trunk_x_up", 0.0),
         "trunk_y_up": terms.get("trunk_y_up", 0.0),
         "trunk_z_up": terms.get("trunk_z_up", 0.0),
         "tilt_error": terms.get("tilt_error", 0.0),
         "tilt_direction": _tilt_direction(terms),
+        "reset_noise_enabled": terms.get("reset_noise_enabled", 0.0),
+        "reset_noise_base_height_offset": terms.get("reset_noise_base_height_offset", 0.0),
+        "reset_noise_roll": terms.get("reset_noise_roll", 0.0),
+        "reset_noise_pitch": terms.get("reset_noise_pitch", 0.0),
+        "reset_noise_joint_pos_offset_rms": terms.get("reset_noise_joint_pos_offset_rms", 0.0),
+        "reset_noise_joint_vel_offset_rms": terms.get("reset_noise_joint_vel_offset_rms", 0.0),
+        "reset_noise_base_linear_velocity_norm": terms.get("reset_noise_base_linear_velocity_norm", 0.0),
+        "reset_noise_base_angular_velocity_norm": terms.get("reset_noise_base_angular_velocity_norm", 0.0),
+        "reset_noise_initial_min_foot_y": terms.get("reset_noise_initial_min_foot_y", 0.0),
+        "reset_noise_initial_max_foot_load": terms.get("reset_noise_initial_max_foot_load", 0.0),
         "lin_vel_x": terms.get("lin_vel_x", 0.0),
         "lin_vel_z": terms.get("lin_vel_z", 0.0),
         "mean_abs_action": terms.get("mean_abs_action", 0.0),
@@ -555,6 +595,8 @@ def _timeline_row(
         "max_abs_raw_action_delta": float(np.max(np.abs(raw_action_delta))),
         "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_delta))),
         "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_delta))),
+        "mean_filter_lag": float(np.mean(np.abs(raw_action - executed_action))),
+        "max_filter_lag": float(np.max(np.abs(raw_action - executed_action))),
         "mean_abs_joint_vel": terms.get("mean_abs_joint_vel", 0.0),
         "leg_symmetry_error": terms.get("leg_symmetry_error", 0.0),
         "foot_dxz_max": foot_stats["foot_dxz_max"],
@@ -588,13 +630,14 @@ def _timeline_row(
         "executed_action_rate_per_leg": json.dumps(executed_action_rates, sort_keys=True),
         "nonfoot_loads": json.dumps(_foot_map(contact_stats["nonfoot_loads"]), sort_keys=True),
         "max_nonfoot_load": max(contact_stats["nonfoot_loads"]),
-        "joint_positions": json.dumps(obs[13:25].astype(float).tolist()),
+        "joint_positions": json.dumps(obs[11:23].astype(float).tolist()),
         "actions": json.dumps(np.asarray(executed_action, dtype=float).tolist()),
         "action_deltas": json.dumps(np.asarray(executed_action_delta, dtype=float).tolist()),
         "raw_actions": json.dumps(np.asarray(raw_action, dtype=float).tolist()),
         "executed_actions": json.dumps(np.asarray(executed_action, dtype=float).tolist()),
         "raw_action_deltas": json.dumps(np.asarray(raw_action_delta, dtype=float).tolist()),
         "executed_action_deltas": json.dumps(np.asarray(executed_action_delta, dtype=float).tolist()),
+        "filter_lag": json.dumps(np.asarray(raw_action - executed_action, dtype=float).tolist()),
     }
 
 
@@ -685,13 +728,18 @@ def diagnose_episode(
 ) -> dict[str, Any]:
     obs, info = env.reset()
     friction = float(info["ground_friction"])
+    spawn = {
+        "x": float(info.get("spawn_x", args.spawn_x)),
+        "z": float(info.get("spawn_z", args.spawn_z)),
+    }
     material_properties = info.get("material_properties", {})
+    reset_noise = info.get("reset_noise", {})
     effective_friction = material_properties.get("effective_friction", info.get("effective_friction", friction))
     effective_friction = None if effective_friction is None else float(effective_friction)
     tracked_feet = foot_bodies(env)
     tracked_contacts = contact_body_groups(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
-    reset_base_xz = (float(obs[0]), float(obs[2]))
+    reset_base_xz = (float(spawn["x"]), float(spawn["z"]))
     reset_yaw = _yaw_from_obs(obs)
     prev_raw_action = np.zeros(12, dtype=np.float32)
     prev_executed_action = np.zeros(12, dtype=np.float32)
@@ -845,8 +893,14 @@ def diagnose_episode(
 
         records.append({
             "step": steps,
-            "base_x": float(obs[0]),
-            "base_z": float(obs[2]),
+            "base_x": float(terms.get("base_world_x", 0.0)),
+            "base_z": float(terms.get("base_world_z", 0.0)),
+            "base_world_y": float(terms.get("base_world_y", 0.0)),
+            "base_relative_height": float(terms.get("base_relative_height", 0.0)),
+            "ground_top_y": float(terms.get("ground_top_y", 0.0)),
+            "ground_height_offset": float(terms.get("ground_height_offset", 0.0)),
+            "base_reset_x": float(terms.get("base_reset_x", 0.0)),
+            "base_reset_z": float(terms.get("base_reset_z", 0.0)),
             "base_ref_x": float(terms.get("base_ref_x", 0.0)),
             "base_ref_z": float(terms.get("base_ref_z", 0.0)),
             "yaw": _yaw_from_obs(obs),
@@ -879,7 +933,8 @@ def diagnose_episode(
             "executed_action": executed_action.astype(float).copy(),
             "raw_action_delta": raw_action_delta.astype(float).copy(),
             "executed_action_delta": executed_action_delta.astype(float).copy(),
-            "joint_pos": obs[13:25].astype(float).copy(),
+            "filter_lag": (raw_action - executed_action).astype(float).copy(),
+            "joint_pos": obs[11:23].astype(float).copy(),
         })
 
         if timeline_writer is not None:
@@ -926,7 +981,9 @@ def diagnose_episode(
         "termination_reason": info.get("termination_reason") or ("truncated" if truncated else "unknown"),
         "friction": friction,
         "effective_friction": effective_friction,
+        "spawn": spawn,
         "material_properties": material_properties,
+        "reset_noise": reset_noise,
         "freeze_action": {
             "enabled": args.freeze_after_steps is not None,
             "freeze_step": args.freeze_after_steps,
@@ -1007,6 +1064,8 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "max_abs_raw_action_delta",
         "mean_abs_executed_action_delta",
         "max_abs_executed_action_delta",
+        "mean_filter_lag",
+        "max_filter_lag",
         "joint_error_from_nominal",
     )
     result = {
@@ -1240,7 +1299,17 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
         "policy": str(args.policy),
         "terrain": args.terrain,
         "friction_range": [args.friction_min, args.friction_max],
+        "spawn": {
+            "x": args.spawn_x,
+            "z": args.spawn_z,
+        },
+        "ground_height_offset": args.ground_height_offset,
         "material_properties": material_properties,
+        "reset_noise": {
+            "level": args.reset_noise_level,
+            "components": args.reset_noise_components,
+            "episode_samples": [item.get("reset_noise", {}) for item in episodes],
+        },
         "freeze_action": {
             "enabled": args.freeze_after_steps is not None,
             "freeze_step": args.freeze_after_steps,
@@ -1366,6 +1435,8 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
         "mean_abs_raw_action_delta",
         "mean_abs_executed_action_delta",
         "max_abs_executed_action_delta",
+        "mean_filter_lag",
+        "max_filter_lag",
     ):
         print(f"  {key}: {settled[key]:.6f}")
 
@@ -1381,6 +1452,11 @@ def main() -> None:
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
+        reset_noise_level=args.reset_noise_level,
+        reset_noise_components=args.reset_noise_components,
+        spawn_x=args.spawn_x,
+        spawn_z=args.spawn_z,
+        ground_height_offset=args.ground_height_offset,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
 

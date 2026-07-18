@@ -11,6 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from project_config import DEFAULT_ACTION_FILTER_TAU
+
+
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("policy", type=Path, help="Path to a Stable-Baselines3 policy zip.")
@@ -18,15 +24,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
     parser.add_argument("--friction-min", type=float, default=0.5)
     parser.add_argument("--friction-max", type=float, default=1.1)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument("--early-window-steps", type=int, default=250)
     parser.add_argument("--settled-window-steps", type=int, default=250)
     parser.add_argument(
         "--action-filter-tau",
         type=float,
-        default=None,
-        help="Optional environment action low-pass filter time constant in seconds.",
+        default=DEFAULT_ACTION_FILTER_TAU,
+        help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
         "--diagnostics-root",
@@ -89,7 +98,7 @@ def parse_evaluate_stdout(output: str) -> dict[str, Any]:
             "mean_length",
             "mean_abs_action",
             "max_abs_action",
-            "min_trunk_y",
+            "min_base_relative_height",
             "min_upright_score",
             "friction_min_seen",
             "friction_max_seen",
@@ -153,13 +162,16 @@ def compact_summary(
         "episodes": args.episodes,
         "max_steps": args.max_steps,
         "action_filter_tau": args.action_filter_tau,
+        "reset_noise_level": args.reset_noise_level,
+        "reset_noise_components": args.reset_noise_components,
+        "ground_height_offset": args.ground_height_offset,
         "material_properties": diagnose_summary.get("material_properties"),
         "eval": {
             "survival_rate": eval_metrics.get("survival_rate"),
             "mean_length": eval_metrics.get("mean_length"),
             "mean_reward": eval_metrics.get("mean_reward"),
             "min_upright_score": eval_metrics.get("min_upright_score"),
-            "min_trunk_y": eval_metrics.get("min_trunk_y"),
+            "min_base_relative_height": eval_metrics.get("min_base_relative_height"),
             "termination_reasons": eval_metrics.get("termination_reasons"),
             "friction_min_seen": eval_metrics.get("friction_min_seen"),
             "friction_max_seen": eval_metrics.get("friction_max_seen"),
@@ -180,6 +192,8 @@ def compact_summary(
             "settled_yaw_drift_from_reset": settled_window.get("yaw_drift_from_reset"),
             "settled_mean_trunk_x_up": settled_window.get("mean_trunk_x_up"),
             "settled_mean_trunk_y_up": settled_window.get("mean_trunk_y_up"),
+            "settled_mean_base_relative_height": settled_window.get("mean_base_relative_height"),
+            "settled_min_base_relative_height": settled_window.get("min_base_relative_height"),
             "settled_mean_tilt_error": settled_window.get("mean_tilt_error"),
             "settled_min_foot_load": settled_window.get("min_foot_load"),
             "settled_foot_tangential_force_mean": settled_window.get("foot_tangential_force_mean"),
@@ -253,10 +267,16 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         str(args.friction_min),
         "--friction-max",
         str(args.friction_max),
+        "--ground-height-offset",
+        str(args.ground_height_offset),
         "--episodes",
         str(args.episodes),
         "--max-steps",
         str(args.max_steps),
+        "--reset-noise-level",
+        args.reset_noise_level,
+        "--reset-noise-components",
+        args.reset_noise_components,
     ]
     if args.action_filter_tau is not None:
         eval_command.extend(["--action-filter-tau", str(args.action_filter_tau)])
@@ -270,6 +290,8 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         str(args.friction_min),
         "--friction-max",
         str(args.friction_max),
+        "--ground-height-offset",
+        str(args.ground_height_offset),
         "--episodes",
         str(args.episodes),
         "--max-steps",
@@ -278,6 +300,10 @@ def run_condition(args: argparse.Namespace, out_dir: Path, name: str) -> dict[st
         str(args.early_window_steps),
         "--settled-window-steps",
         str(args.settled_window_steps),
+        "--reset-noise-level",
+        args.reset_noise_level,
+        "--reset-noise-components",
+        args.reset_noise_components,
         "--out",
         str(out_dir),
     ]

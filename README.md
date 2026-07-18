@@ -1,13 +1,61 @@
 # Quad Go1
 
-Project Chrono reinforcement-learning project for a Unitree Go1-style
-quadruped. The current milestone is a reproducible flat-ground standing policy
-that remains stable across randomized effective friction.
+Project Chrono + PPO reinforcement-learning project for a Unitree Go1-style
+quadruped. The project is building a reproducible standing controller before
+moving to terrain and locomotion.
 
-## Current Result
+The active worktree is now standing v3.1: a 65D relative-state observation with
+no absolute world XYZ in the policy input and relative-height termination. The
+first v3.1 fixed-friction checkpoint is accepted for clean flat standing and
+coordinate-invariance checks.
+
+## Current V3.1 Result
 
 ```text
-accepted baseline:
+current v3.1 fixed-standing baseline:
+  runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
+
+required runtime setup:
+  action_filter_tau = 0.05
+  foot_friction = 2.0
+
+accepted so far:
+  fixed flat mu = 0.8
+  clean reset
+  spawn X/Z offsets through +/-0.5 m
+  ground-height offsets through +/-0.20 m
+```
+
+V3.1 has not yet been re-accepted for randomized friction or reset noise. The
+last accepted v2 checkpoint still owns those broader robustness claims.
+
+V3.1 fixed `mu=0.8`, clean reset confirmation:
+
+```text
+episodes: 30
+result: 30/30 nominal
+active-reference drift: 0.000207 m
+settled total contact foot slip: 0.007678 m
+settled contact switches: 0
+settled min foot load: 26.95 N
+max settled friction usage: 0.03711
+max non-foot load: 0.0
+```
+
+Coordinate-invariance screening also passed:
+
+```text
+spawn offsets: 8 shifted X/Z cases, 30/30 nominal each
+ground-height offsets: -0.20, -0.10, +0.10, +0.20 m, 30/30 nominal each
+worst coordinate-screen drift: 0.000288 m
+worst coordinate-screen slip: 0.008764 m
+switches: 0 in every screen
+```
+
+## Last Accepted V2 Result
+
+```text
+last accepted v2 baseline:
   runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
 
 required runtime setup:
@@ -16,11 +64,15 @@ required runtime setup:
 
 accepted effective friction range:
   mu = 0.5-1.2
+
+accepted reset range:
+  clean, RN-1, RN-2
 ```
 
-The checkpoint alone is not the full controller. Reproducing the accepted
+The v2 checkpoint alone is not the full controller. Reproducing the accepted v2
 behavior requires the environment action filter and the `2.0` foot-friction
-cap-removal setting in `go1_env.py`.
+cap-removal setting. It also requires the pre-v3 37D observation code; v2
+checkpoints are shape-incompatible with the active v3.1 worktree.
 
 Thirty deterministic 5000-step episodes were run at each fixed slice:
 
@@ -34,6 +86,26 @@ worst settled min foot load: 28.53 N
 max settled friction usage: 0.01833
 ```
 
+Reset-noise keeper confirmation used 100 deterministic 5000-step episodes for
+each reset/friction pair:
+
+```text
+reset levels: clean, RN-1, RN-2
+friction slices: 0.5, 0.8, 1.2
+result: 100/100 nominal on every condition
+worst active-reference drift: 0.002813 m
+worst settled total foot slip: 0.003756 m
+settled contact switches: 0 on every condition
+worst settled min foot load: 28.53 N
+max settled friction usage: 0.02035
+```
+
+Strongest single RN-2 evidence file:
+
+```text
+diagnostics/keeper_reset_rn2_mu_0p5_confirm100/summary.json
+```
+
 ## Quick Start
 
 Activate the supported WSL conda environment:
@@ -42,31 +114,31 @@ Activate the supported WSL conda environment:
 conda activate chrono-go1
 ```
 
-View the accepted policy:
+View the accepted v3.1 fixed-standing checkpoint:
 
 ```bash
-python view_stand_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 0.5 --friction-max 1.2 --max-steps 5000 --action-filter-tau 0.05
+python view_stand_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --action-filter-tau 0.05
 ```
 
-Run one diagnostic episode at the hardest accepted high-friction slice:
+Run the accepted fixed-standing diagnostic:
 
 ```bash
-python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 1 --max-steps 5000 --action-filter-tau 0.05 --log-every-step --out diagnostics/current_baseline_mu12_timeline
-python analyze_slip_timeline.py diagnostics/current_baseline_mu12_timeline/timeline.csv
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --reset-noise-level clean --reset-noise-components combined --out diagnostics/v3p1_fixed08_005k_clean_mu08_confirm30
 ```
 
-Run a compact 30-episode regression:
+Run a coordinate-invariance check:
 
 ```bash
-python run_regression.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --name current_baseline_mu12_confirm30 --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --spawn-x 0.5 --spawn-z 0.5 --out diagnostics/v3p1_fixed08_005k_spawn_x0p5_z0p5_confirm30
 ```
 
 ## Reward And Control
 
-The active standing reward rewards survival/uprightness and penalizes tilt,
-pose error, control effort, joint velocity, action rate, angular velocity, raw
-X/Z base velocity, missing foot load, post-settle foot-anchor drift, and
-post-settle base drift.
+The active v3.1 reward rewards survival/uprightness and penalizes tilt, pose
+error, control effort, joint velocity, action rate, angular velocity, raw X/Z
+base velocity, missing foot load, direct loaded-foot slip, post-settle
+foot-anchor drift, post-settle base drift, contact switches, anchor resets,
+anchor deactivations, raw action jitter, and filter lag.
 
 Important active settings:
 
@@ -77,14 +149,20 @@ pose                    0.30
 control                 0.03
 joint_velocity          0.02
 action_rate             0.05
+raw_action_rate         0.02
+filter_lag              0.02
 tilt                    0.25
 angular_velocity        0.01
 xz_velocity             1.00
-foot_contact            2.00
-foot_slip               0.00
-foot_anchor             5.00, 0.005 m deadband
-base_drift              2.00, 0.01 m deadband
-standing quality start  step 100
+foot_contact            mean 1.00, worst-foot 2.00
+foot_slip               50.00 * loaded_step_slip / 0.03 m
+foot_anchor             0.10 normalized beyond 0.005 m
+base_drift              0.05 normalized beyond 0.01 m
+contact_switch          0.10 per hysteresis switch
+anchor_reset            0.50 per reset
+anchor_deactivation     1.00 per deactivation
+load quality ramp       first 50 steps
+stance quality ramp     first 100 steps
 minimum foot load       20 N
 ```
 
@@ -95,11 +173,35 @@ alpha = dt / (tau + dt)
 executed_action = previous_executed_action + alpha * (raw_action - previous_executed_action)
 ```
 
-For the accepted baseline, `tau=0.05` and `dt=0.002`, so `alpha=0.038462`.
+For the last accepted v2 baseline, `tau=0.05` and `dt=0.002`, so
+`alpha=0.038462`.
 
 Rejected reward paths are documented in the ADR log. Stance-shape, normalized
 X/Z velocity, base drift `10.0`, and global foot-slip reward `0.05` are not
 active.
+
+## Main Issues Encountered
+
+The main project lesson is that “survives the episode” was not enough. The
+standing policy had to be judged by settled drift, loaded-foot slip, contact
+switching, foot load, friction usage, and whether the policy depended on world
+coordinates.
+
+Key issues and where they are documented:
+
+- Long-hold foot creep after apparently stable standing:
+  [ADR-002](docs/experiments/fixed_friction_standing.md#adr-002-anchor5-improved-support-but-failed-long-hold-creep)
+- Over-strong base drift reward `10.0` worsening contact behavior:
+  [ADR-003](docs/experiments/fixed_friction_standing.md#adr-003-base-drift-100-was-too-strong)
+- Action jitter causing slip even when the standing pose was viable:
+  [ADR-005](docs/experiments/fixed_friction_standing.md#adr-005-freeze-action-diagnostic-identified-action-jitter)
+- Rejected normalized foot-slip and stance-shape reward branches:
+  [ADR-007](docs/experiments/fixed_friction_standing.md#adr-007-normalized-foot-slip-005-did-not-help),
+  [ADR-008](docs/experiments/fixed_friction_standing.md#adr-008-stance-shape-005-and-0005-were-rejected)
+- Absolute world XYZ in the old v2 observation:
+  [ADR-015](docs/experiments/fixed_friction_standing.md#adr-015-relative-state-standing-v3-attempt-stopped-at-fixed-mu-gate)
+- V3.1 recovery with relative observation, filter-state input, and slip-aligned
+  reward: [ADR-016](docs/experiments/fixed_friction_standing.md#adr-016-v31-filter-state-and-slip-aligned-reward)
 
 ## Docs Map
 
@@ -133,15 +235,19 @@ docs/                      decision logs and reproducibility notes
 
 ## Next Work
 
-Friction robustness is accepted for flat terrain over effective `mu=0.5-1.2`.
-The next research phase should add one robustness axis at a time:
+Friction robustness and RN-1/RN-2 reset-state robustness are accepted for flat
+terrain for the v2 baseline. V3.1 now recovers clean fixed-friction standing
+without absolute world XYZ in the policy observation. The next step is to
+re-run the friction and reset-noise gates on v3.1 before observation noise.
+
+Next sequence:
 
 ```text
-1. reset-state noise
-2. observation noise
-3. terrain variation
-4. actuator/model randomization
-5. SCM deformable terrain
+1. re-check friction slices for v3.1
+2. re-check reset-noise gates for v3.1
+3. add observation noise
+4. move to SCM/deformable terrain bridge
+5. build locomotion policies
 ```
 
 Every new checkpoint should be rechecked on fixed friction slices before it is

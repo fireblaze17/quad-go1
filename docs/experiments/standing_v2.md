@@ -1,7 +1,7 @@
 # Standing V2 Model Card
 
-> Historical note: this is the old fixed-friction model card. The current
-> accepted baseline is the randomized 10k checkpoint with `action_filter_tau=0.05`
+> Historical note: this is the old fixed-friction model card. The last accepted
+> v2 baseline is the randomized 10k checkpoint with `action_filter_tau=0.05`
 > and foot friction `2.0`, documented in
 > [fixed_friction_standing.md](fixed_friction_standing.md) and
 > [../reproduction_ladder.md](../reproduction_ladder.md). This page is kept for

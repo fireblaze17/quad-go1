@@ -1,18 +1,23 @@
 # Reproduction Ladder
 
 This guide records the closest reproducible path from an untrained policy to
-the current accepted standing controller. The run artifacts under `runs/` are
-gitignored, so exact reproduction requires preserving or sharing checkpoints
-out of band.
+the last accepted v2 standing controller, plus the active v3/v3.1 relative-state
+retraining branch. The run artifacts under `runs/` are gitignored, so exact
+reproduction requires preserving or sharing checkpoints out of band.
 
-Current accepted endpoint:
+Last accepted v2 endpoint:
 
 ```text
 runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
 Go1Env(action_filter_tau=0.05)
 _FOOT_FRICTION = 2.0
 effective flat friction mu = 0.5-1.2
+reset noise clean/RN-1/RN-2
 ```
+
+The v2 endpoint requires the pre-v3 37D observation code. It is
+shape-incompatible with the active 65D v3.1 worktree. See ADR-015 and ADR-016
+in `docs/experiments/fixed_friction_standing.md` for the relative-state branch.
 
 ## Environment Setup
 
@@ -25,7 +30,7 @@ python -m py_compile go1_env.py train_stand.py evaluate_stand.py diagnose_policy
 
 The project uses WSL Ubuntu for PyChrono and WSLg for Irrlicht viewers.
 
-## Active Reward
+## Active V3.1 Reward
 
 The current active reward is:
 
@@ -38,11 +43,15 @@ reward =
 - control_penalty
 - joint_velocity_penalty
 - action_rate_penalty
+- raw_action_rate_penalty
+- filter_lag_penalty
 - angular_velocity_penalty
 - raw X/Z velocity penalty
 - missing-foot-load contact penalty
-- foot-anchor penalty after step 100
-- base-drift penalty after step 100
+- loaded-foot slip penalty
+- foot-anchor penalty after the stance ramp
+- base-drift penalty after the stance ramp
+- contact-switch and anchor reset/deactivation penalties
 ```
 
 Current weights:
@@ -54,17 +63,21 @@ pose                    0.30
 control                 0.03
 joint_velocity          0.02
 action_rate             0.05
+raw_action_rate         0.02
+filter_lag              0.02
 tilt                    0.25
 angular_velocity        0.01
 xz_velocity             1.00
-foot_contact            2.00
-foot_slip               0.00
-foot_anchor             5.00
-foot_anchor_deadband    0.005 m
-base_drift              2.00
-base_drift_deadband     0.01 m
+foot_contact            mean 1.00, worst-foot 2.00
+foot_slip               50.00 * loaded_step_slip / 0.03 m
+foot_anchor             0.10 normalized beyond 0.005 m
+base_drift              0.05 normalized beyond 0.01 m
+contact_switch          0.10
+anchor_reset            0.50
+anchor_deactivation     1.00
 minimum_foot_load       20 N
-standing_quality_start  step 100
+load_quality_ramp       50 steps
+stance_quality_ramp     100 steps
 ```
 
 The action filter is not a reward:
@@ -280,6 +293,145 @@ contact switches: 0 on every slice
 worst settled min foot load: 28.53 N
 max settled friction usage: 0.01833
 ```
+
+## Stage 7: Reset-State Noise Evaluation
+
+Reset noise was added after friction robustness, using the existing randomized
+10k checkpoint. No PPO training was needed.
+
+Implemented reset levels:
+
+```text
+RN-1: tiny height, roll/pitch, joint position, joint velocity, and base velocity perturbations
+RN-2: target perturbations, roughly double RN-1 for pose and larger for velocities
+RN-3: stretch level for future testing, not part of the accepted gate
+```
+
+Screening used 30 episodes per condition. Keeper confirmation used:
+
+```text
+policy: runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
+reset levels: clean, RN-1, RN-2
+friction slices: 0.5, 0.8, 1.2
+episodes: 100 per condition
+max_steps: 5000
+action_filter_tau: 0.05
+```
+
+Representative command:
+
+```bash
+python diagnose_policy.py runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip --terrain flat --friction-min 0.5 --friction-max 0.5 --episodes 100 --max-steps 5000 --action-filter-tau 0.05 --reset-noise-level rn2 --reset-noise-components combined --out diagnostics/keeper_reset_rn2_mu_0p5_confirm100
+```
+
+Strongest single evidence file:
+
+```text
+diagnostics/keeper_reset_rn2_mu_0p5_confirm100/summary.json
+```
+
+Result:
+
+```text
+100/100 nominal on every clean/RN-1/RN-2 x mu=0.5/0.8/1.2 condition
+worst active-reference drift: 0.002813 m
+worst settled total contact foot slip: 0.003756 m
+contact switches: 0 on every condition
+worst settled min foot load: 28.53 N
+max settled friction usage: 0.02035
+max non-foot load: 0.0
+```
+
+Decision: accept the current checkpoint as reset-noise capable through RN-2
+without additional training.
+
+## Stage 8: V3/V3.1 Relative-State Branch
+
+The v2 result worked, but it used absolute world base position in the policy
+observation and absolute world height in termination. V3 removes that dependency
+before observation noise, SCM terrain, and locomotion.
+
+V3 design rule:
+
+```text
+no absolute world X/Y/Z in policy input
+no absolute world-height termination
+```
+
+First v3 attempt:
+
+```bash
+python train_stand.py \
+  --save-dir runs/stand_v3_relative_obs_fixed08_500k \
+  --terrain flat \
+  --friction-min 0.8 \
+  --friction-max 0.8 \
+  --max-steps 5000 \
+  --timesteps 500000 \
+  --checkpoint-freq 25000 \
+  --learning-rate 0.0003 \
+  --clip-range 0.2 \
+  --action-filter-tau 0.05
+```
+
+Result: rejected. The best early checkpoint survived but slid:
+
+```text
+runs/stand_v3_relative_obs_fixed08_500k/checkpoints/stand_policy_25000_steps.zip
+30/30 nominal
+active-reference drift: 0.009009 m
+settled slip: 0.510896 m
+gate: failed, slip must be <= 0.03 m
+```
+
+V3.1 corrected the mismatch by expanding the observation to 65D and adding
+slip-aligned normalized penalties. It still excludes absolute world XYZ.
+
+V3.1 training command:
+
+```bash
+python train_stand.py \
+  --save-dir runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k \
+  --terrain flat \
+  --friction-min 0.8 \
+  --friction-max 0.8 \
+  --max-steps 5000 \
+  --timesteps 50000 \
+  --checkpoint-freq 5000 \
+  --learning-rate 0.0003 \
+  --clip-range 0.2 \
+  --action-filter-tau 0.05
+```
+
+Promoted v3.1 checkpoint:
+
+```text
+runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
+```
+
+Fixed `mu=0.8` confirmation:
+
+```text
+30/30 nominal
+active-reference drift: 0.000207 m
+settled total contact foot slip: 0.007678 m
+contact switches: 0
+settled min foot load: 26.95 N
+max non-foot load: 0.0
+```
+
+Coordinate-invariance confirmation:
+
+```text
+spawn X/Z offsets through +/-0.5 m: all 30/30 nominal
+ground-height offsets through +/-0.20 m: all 30/30 nominal
+worst coordinate-screen drift: 0.000288 m
+worst coordinate-screen slip: 0.008764 m
+```
+
+Next reproduction steps for v3.1 are to repeat Stage 6 friction slices and
+Stage 7 reset-noise screens with the v3.1 checkpoint before adding observation
+noise.
 
 ## Acceptance Pattern
 

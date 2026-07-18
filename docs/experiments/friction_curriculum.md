@@ -1,7 +1,7 @@
 # Flat Friction Curriculum
 
 > Historical note: this document records the pre-action-filter A/AB/C friction
-> curriculum. The current accepted baseline is the randomized 10k checkpoint
+> curriculum. The last accepted v2 baseline is the randomized 10k checkpoint
 > with `action_filter_tau=0.05` and foot friction `2.0`, documented in
 > [fixed_friction_standing.md](fixed_friction_standing.md) and
 > [../reproduction_ladder.md](../reproduction_ladder.md). Use this file as
@@ -104,12 +104,14 @@ What changed:
 - Forced Stable-Baselines3 PPO to use CPU for this MLP policy after SB3 warned
   that CUDA can be slower for non-CNN PPO.
 
-Why it changed:
+Why it changed historically:
 
 - The fixed-friction standing v2 policy was accepted, but it only covered
   friction `0.8`.
-- The next robustness step is friction randomization before changing terrain,
-  reset noise, or reward terms.
+- At that time, the next robustness step was friction randomization before
+  changing terrain, reset noise, or reward terms. This is no longer the active
+  roadmap; the current filtered-control baseline has already accepted friction
+  and reset-noise gates.
 - Native GPU use was not useful here because Chrono rollout simulation and MLP
   PPO updates are CPU-oriented; the warning coincided with lower training FPS.
 

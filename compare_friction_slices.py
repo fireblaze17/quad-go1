@@ -9,7 +9,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from project_config import DEFAULT_ACTION_FILTER_TAU
+
 DEFAULT_MUS = (0.50, 0.60, 0.70, 0.80, 0.95, 1.10)
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,13 +24,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument("--early-window-steps", type=int, default=250)
     parser.add_argument("--settled-window-steps", type=int, default=250)
     parser.add_argument(
         "--action-filter-tau",
         type=float,
-        default=None,
-        help="Optional environment action low-pass filter time constant in seconds.",
+        default=DEFAULT_ACTION_FILTER_TAU,
+        help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
         "--mu",
@@ -58,6 +65,9 @@ def _row(label: str, mu: float, summary: dict[str, Any], split: str) -> dict[str
         "policy_label": label,
         "mu": mu,
         "split": split,
+        "reset_noise_level": summary.get("reset_noise_level"),
+        "reset_noise_components": summary.get("reset_noise_components"),
+        "ground_height_offset": summary.get("ground_height_offset"),
         "survival_rate": eval_block.get("survival_rate"),
         "mean_reward": eval_block.get("mean_reward"),
         "mean_abs_xz_vel": eval_block.get("mean_abs_xz_vel"),
@@ -101,6 +111,12 @@ def main() -> None:
                 str(args.episodes),
                 "--max-steps",
                 str(args.max_steps),
+                "--ground-height-offset",
+                str(args.ground_height_offset),
+                "--reset-noise-level",
+                args.reset_noise_level,
+                "--reset-noise-components",
+                args.reset_noise_components,
                 "--early-window-steps",
                 str(args.early_window_steps),
                 "--settled-window-steps",

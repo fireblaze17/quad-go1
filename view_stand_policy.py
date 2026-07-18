@@ -18,9 +18,14 @@ from diagnostics import (
 from go1_env import Go1Env, _HOME_JOINT_ANGLES, _JOINT_NAMES
 from project_config import (
     CURRENT_BASELINE_MODEL,
+    DEFAULT_ACTION_FILTER_TAU,
     DEFAULT_VIEWER_FRICTION_RANGE,
     SB3_DEVICE,
 )
+
+
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
 
 
 def parse_args():
@@ -36,11 +41,16 @@ def parse_args():
     parser.add_argument("--friction-min", type=float, default=DEFAULT_VIEWER_FRICTION_RANGE[0])
     parser.add_argument("--friction-max", type=float, default=DEFAULT_VIEWER_FRICTION_RANGE[1])
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--spawn-x", type=float, default=0.0)
+    parser.add_argument("--spawn-z", type=float, default=0.0)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument(
         "--action-filter-tau",
         type=float,
-        default=None,
-        help="Optional environment action low-pass filter time constant in seconds.",
+        default=DEFAULT_ACTION_FILTER_TAU,
+        help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
         "--log-interval",
@@ -62,7 +72,7 @@ def parse_args():
 
 
 def print_joint_debug(obs) -> None:
-    joint_pos = obs[13:25]
+    joint_pos = obs[11:23]
     joint_error = joint_pos - _HOME_JOINT_ANGLES
     print("joint_debug step=reset")
     for name, measured, home, error in zip(
@@ -97,7 +107,7 @@ def print_compact_policy_step(
     foot_load_min = min(interval_stats["foot_load_min"])
     print(
         f"ep={episode:03d} step={step:04d} "
-        f"h={_term(terms, 'trunk_y'):.3f} "
+        f"h_rel={_term(terms, 'base_relative_height'):.3f} "
         f"up={_term(terms, 'upright_score'):.3f} "
         f"xz=({_term(terms, 'lin_vel_x'):+.3f},{_term(terms, 'lin_vel_z'):+.3f}) "
         f"act={_term(terms, 'mean_abs_action'):.3f} "
@@ -156,7 +166,7 @@ def print_full_policy_step(
         )
     print(
         f"ep={episode:03d} step={step:04d} "
-        f"height={_term(terms, 'trunk_y'):.3f} "
+        f"height_rel={_term(terms, 'base_relative_height'):.3f} "
         f"upright={_term(terms, 'upright_score'):.3f} "
         f"xz_vel=({_term(terms, 'lin_vel_x'):+.3f},"
         f"{_term(terms, 'lin_vel_z'):+.3f}) "
@@ -187,6 +197,11 @@ def main() -> None:
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
         action_filter_tau=args.action_filter_tau,
+        reset_noise_level=args.reset_noise_level,
+        reset_noise_components=args.reset_noise_components,
+        spawn_x=args.spawn_x,
+        spawn_z=args.spawn_z,
+        ground_height_offset=args.ground_height_offset,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
     obs, _ = env.reset()
@@ -199,7 +214,10 @@ def main() -> None:
     print(
         f"viewing policy={args.policy} terrain={args.terrain} "
         f"friction=({args.friction_min:.2f}, {args.friction_max:.2f}) "
-        f"action_filter_tau={args.action_filter_tau}"
+        f"spawn=({args.spawn_x:.2f}, {args.spawn_z:.2f}) "
+        f"ground_height_offset={args.ground_height_offset:.2f} "
+        f"action_filter_tau={args.action_filter_tau} "
+        f"reset_noise={args.reset_noise_level}/{args.reset_noise_components}"
     )
     step = 0
     episode = 1

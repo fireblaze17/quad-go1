@@ -7,7 +7,11 @@ import numpy as np
 from stable_baselines3 import PPO
 
 from go1_env import Go1Env
-from project_config import CURRENT_BASELINE_MODEL, SB3_DEVICE
+from project_config import CURRENT_BASELINE_MODEL, DEFAULT_ACTION_FILTER_TAU, SB3_DEVICE
+
+
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
 
 
 def parse_args():
@@ -22,13 +26,16 @@ def parse_args():
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
     parser.add_argument("--friction-min", type=float, default=0.8)
     parser.add_argument("--friction-max", type=float, default=0.8)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument(
         "--action-filter-tau",
         type=float,
-        default=None,
-        help="Optional environment action low-pass filter time constant in seconds.",
+        default=DEFAULT_ACTION_FILTER_TAU,
+        help="Environment action low-pass filter time constant in seconds.",
     )
     return parser.parse_args()
 
@@ -47,6 +54,9 @@ def main() -> None:
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
         action_filter_tau=args.action_filter_tau,
+        reset_noise_level=args.reset_noise_level,
+        reset_noise_components=args.reset_noise_components,
+        ground_height_offset=args.ground_height_offset,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
 
@@ -92,7 +102,7 @@ def main() -> None:
                     reward_term_totals[key] = reward_term_totals.get(key, 0.0) + float(value)
                     reward_term_counts[key] = reward_term_counts.get(key, 0) + 1
 
-            min_height = min(min_height, reward_terms.get("trunk_y", float("inf")))
+            min_height = min(min_height, reward_terms.get("base_relative_height", float("inf")))
             min_upright_score = min(
                 min_upright_score,
                 reward_terms.get("upright_score", float("inf")),
@@ -124,7 +134,7 @@ def main() -> None:
     print(f"mean_length: {np.mean(episode_lengths):.1f}")
     print(f"mean_abs_action: {np.mean(mean_abs_actions):.3f}")
     print(f"max_abs_action: {np.max(max_abs_actions):.3f}")
-    print(f"min_trunk_y: {np.min(min_heights):.3f}")
+    print(f"min_base_relative_height: {np.min(min_heights):.3f}")
     print(f"min_upright_score: {np.min(min_upright_scores):.3f}")
     print(
         "min_axis_up:",
