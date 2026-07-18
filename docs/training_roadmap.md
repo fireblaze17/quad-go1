@@ -10,8 +10,9 @@ The active worktree now targets standing v3.1: no absolute world XYZ in the
 policy input and no absolute world-height termination. V3.1 fixed `mu=0.8`
 clean standing is accepted, including spawn X/Z and ground-height
 coordinate-invariance screens. The last accepted v2 result remains important
-evidence for friction/reset-noise robustness, but v2 checkpoints are
-shape-incompatible with the active 65D v3.1 observation.
+historical evidence for reset-noise robustness, but v2 checkpoints are
+shape-incompatible with the active 65D v3.1 observation and are not the current
+friction baseline.
 
 Current v3.1 fixed-standing baseline:
 
@@ -21,7 +22,7 @@ action_filter_tau = 0.05
 foot_friction = 2.0
 ```
 
-Accepted v3.1 fixed-standing evidence:
+Accepted v3.1 fixed-standing and friction evidence:
 
 ```text
 fixed mu=0.8, clean reset: 30/30 nominal
@@ -34,6 +35,12 @@ spawn X/Z offsets through +/-0.5 m: all 30/30 nominal
 ground-height offsets through +/-0.20 m: all 30/30 nominal
 worst coordinate-screen drift: 0.000288 m
 worst coordinate-screen slip: 0.008764 m
+
+friction slices 0.5,0.6,0.8,0.9,1.0,1.1,1.2: all 100/100 nominal
+worst friction-screen drift: 0.000215 m
+worst friction-screen slip: 0.007615 m
+friction-screen switches: 0 on every slice
+max settled friction usage: 0.03424
 ```
 
 The last accepted v2 randomized-friction flat standing result was accepted over
@@ -162,6 +169,7 @@ foot friction 2.0 cap removal        accepted; 0.5-1.2 passed without training
 reset-state noise RN-1/RN-2          accepted; passed without training
 relative-state standing v3           attempted; first scratch recipe failed Stage 1
 relative-state standing v3.1         accepted fixed mu=0.8 + coordinate invariance
+v3.1 friction 0.5-1.2                accepted without extra PPO training
 ```
 
 Important negative lesson: stronger stationarity rewards were less effective
@@ -200,19 +208,22 @@ Chrono's default SMC material composition combines two contact frictions with
 as a cap-removal setting, not a measured Go1 value. For target ground values
 through `mu=1.2`, effective friction equals ground friction.
 
-The fixed-slice gate already passed for the v2 randomized checkpoint:
+The fixed-slice gate has already passed for the active v3.1 checkpoint:
 
 ```text
-checkpoint: runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
+checkpoint: runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
 slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
-episodes: 30 per slice
-result: nominal on every episode
+episodes: 100 per slice
+result: 100/100 nominal on every slice
+worst active-reference drift: 0.000215 m
+worst settled contact foot slip: 0.007615 m
+max settled friction usage: 0.03424
 ```
 
-Reset-state noise is accepted through RN-2 for the current v2 baseline. However,
-the v2 observation included absolute world coordinates, so observation noise
-and terrain work should wait until the v3.1 relative-state checkpoint re-passes
-friction and reset-noise gates.
+Reset-state noise is accepted through RN-2 for the v2 baseline. Because the v2
+observation included absolute world coordinates, observation-noise and terrain
+work should wait until the v3.1 relative-state checkpoint re-passes reset-noise
+gates.
 
 The first v3 implementation removed absolute world XYZ from policy input and
 replaced absolute-height termination with relative-height termination. Static
@@ -230,17 +241,15 @@ gate: failed, because settled slip must be <= 0.03 m
 Current next sequence:
 
 ```text
-1. re-check fixed friction slices on v3.1
-2. re-check reset-noise gates on v3.1
-3. then add observation noise
-4. then move to SCM/deformable terrain bridge and locomotion policies
+1. re-check reset-noise gates on v3.1
+2. then add observation noise
+3. then move to SCM/deformable terrain bridge and locomotion policies
 ```
 
-Before accepting v3.1 for broader robustness, re-run fixed effective-friction
-slices on the v3.1 checkpoint:
+V3.1 fixed effective-friction slices have now passed. To reproduce one slice:
 
 ```bash
-python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/v3p1_fixed08_005k_mu12_confirm30
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 1.2 --friction-max 1.2 --episodes 100 --max-steps 5000 --action-filter-tau 0.05 --out diagnostics/v3p1_friction_keeper_mu_1p2_confirm100
 ```
 
 Recommended acceptance:

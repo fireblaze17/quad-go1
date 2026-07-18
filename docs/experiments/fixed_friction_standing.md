@@ -676,11 +676,145 @@ diagnostics/v3p1_fixed08_005k_ground_h0p20_confirm30/summary.json
 
 **Consequences:** Promote the v3.1 5k checkpoint as the active fixed-friction
 relative-state standing baseline. Do not treat it as friction-randomized or
-reset-noise accepted yet. The next gates are fixed friction slices and reset
-noise, repeated on v3.1. Observation noise remains deferred until those gates
-pass.
+reset-noise accepted yet at this point in the decision log. ADR-017 later
+accepted the fixed-friction slice gate; reset-noise remains the next v3.1 gate.
+Observation noise remains deferred until reset-noise passes.
 
 This also confirms that v3 did not need a full 500k run to show signal once the
 observation and reward matched the slip/drift gates. Future v3.1 continuations
 should stay checkpoint-driven and promote the earliest checkpoint that passes
 the hard metrics, not the highest reward checkpoint.
+
+## ADR-017: V3.1 Friction Robustness Passed Without PPO Training
+
+**Status:** Accepted
+
+**Context:** V3.1 fixed `mu=0.8` standing and coordinate-invariance screens
+passed in ADR-016. The next gate was to adapt the old v2 friction workflow to
+the active 65D v3.1 policy. Because v2 history showed that longer PPO training
+can degrade stance quality, the v3.1 friction plan was evaluation-first:
+train only if fixed slices failed.
+
+The target effective range stayed the same as v2:
+
+```text
+ground/effective friction mu = 0.5-1.2
+foot friction = 2.0
+action_filter_tau = 0.05
+reset = clean
+max_steps = 5000
+```
+
+Chrono combines flat-ground and foot material friction with the minimum of the
+two contacting materials in this SMC setup. Setting foot friction to `2.0` is a
+cap-removal modeling choice: every commanded ground slice from `0.5` through
+`1.2` becomes the effective friction under test instead of being clipped by the
+foot material.
+
+**Decision:** Keep the v3.1 5k checkpoint and evaluate it directly over fixed
+friction slices before training. Also remove the remaining hard settled-quality
+early return from the reward path. The reward now uses the existing ramps
+continuously:
+
+```text
+load quality ramp:   clip(step / 50, 0, 1)
+stance quality ramp: clip(step / 100, 0, 1)
+```
+
+Reference-dependent anchor/base penalties remain zero until the standing
+reference is captured around step 100. Direct loaded-foot slip and contact
+switch penalties ramp smoothly from the beginning.
+
+**Evidence:** Static checks and implementation validation passed:
+
+```text
+observation_space shape: 65
+reference-dependent penalties finite before and after capture
+load_quality_scale and stance_quality_scale present in reward_terms
+no hard settled-quality early return remains
+```
+
+The 30-episode bridge screen passed every slice:
+
+```text
+mu: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 30 per slice
+failure_type_counts: {'nominal': 30} on every slice
+survival_rate: 1.000 on every slice
+worst active-reference drift: 0.000215 m
+worst settled total contact foot slip: 0.007615 m
+settled contact switches: 0 on every slice
+worst settled min foot load: 26.95 N
+max settled friction usage: 0.03424
+```
+
+The 100-episode keeper confirmation also passed every slice:
+
+```text
+mu: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 100 per slice
+failure_type_counts: {'nominal': 100} on every slice
+survival_rate: 1.000 on every slice
+worst active-reference drift: 0.000215 m
+worst settled total contact foot slip: 0.007615 m
+settled contact switches: 0 on every slice
+worst settled min foot load: 26.95 N
+max settled friction usage: 0.03424
+max non-foot load: 0.0
+```
+
+Per-slice keeper evidence:
+
+```text
+mu   eff_mu_min/max  episodes  nominal  mean_reward  drift_m   slip_m    switches  min_load_N  max_friction_usage  worst_foot
+0.5  0.5 / 0.5       100       100/100   5679.921     0.000201  0.007565  0         26.946      0.034239            RR
+0.6  0.6 / 0.6       100       100/100   5680.691     0.000200  0.007615  0         26.951      0.026631            RR
+0.8  0.8 / 0.8       100       100/100   5679.741     0.000215  0.007392  0         26.977      0.025404            RR
+0.9  0.9 / 0.9       100       100/100   5679.741     0.000215  0.007392  0         26.977      0.022581            RR
+1.0  1.0 / 1.0       100       100/100   5679.741     0.000215  0.007392  0         26.977      0.020323            RR
+1.1  1.1 / 1.1       100       100/100   5679.741     0.000215  0.007392  0         26.977      0.018476            RR
+1.2  1.2 / 1.2       100       100/100   5679.741     0.000215  0.007392  0         26.977      0.016936            RR
+```
+
+Friction margin and action smoothness:
+
+```text
+mu   mean_friction_usage  frames>0.7  frames>0.9  frames>1.0  raw_dact_mean  raw_dact_max  exec_dact_mean  exec_dact_max  filter_lag_mean  filter_lag_max
+0.5  0.009106             0           0           0           0.000186        0.001705      0.000004        0.000039       0.000112         0.000963
+0.6  0.007564             0           0           0           0.000174        0.001426      0.000004        0.000029       0.000108         0.000729
+0.8  0.005511             0           0           0           0.000170        0.001907      0.000004        0.000046       0.000104         0.001150
+0.9  0.004898             0           0           0           0.000170        0.001907      0.000004        0.000046       0.000104         0.001150
+1.0  0.004409             0           0           0           0.000170        0.001907      0.000004        0.000046       0.000104         0.001150
+1.1  0.004008             0           0           0           0.000170        0.001907      0.000004        0.000046       0.000104         0.001150
+1.2  0.003674             0           0           0           0.000170        0.001907      0.000004        0.000046       0.000104         0.001150
+```
+
+Field definitions:
+
+```text
+drift_m = settled base displacement from active standing reference
+slip_m = settled total loaded-contact foot slip distance
+switches = settled contact switches
+min_load_N = settled minimum foot load
+max_friction_usage = max settled ||Ft|| / (mu * Fz + eps)
+raw_dact = raw policy action delta
+exec_dact = filtered/executed action delta
+filter_lag = raw action minus executed action
+```
+
+Primary evidence files:
+
+```text
+diagnostics/v3p1_friction_keeper_mu_0p5_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_0p6_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_0p8_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_0p9_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_1p0_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_1p1_confirm100/summary.json
+diagnostics/v3p1_friction_keeper_mu_1p2_confirm100/summary.json
+```
+
+**Consequences:** Accept the v3.1 5k checkpoint as friction robust over
+effective `mu=0.5-1.2` without additional PPO training. Do not run the planned
+50k v3.1 friction-randomized fallback unless future code changes regress these
+gates. The next active gate is reset-state noise on v3.1.

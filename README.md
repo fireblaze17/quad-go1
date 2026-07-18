@@ -20,14 +20,14 @@ required runtime setup:
   foot_friction = 2.0
 
 accepted so far:
-  fixed flat mu = 0.8
+  effective flat mu = 0.5-1.2
   clean reset
   spawn X/Z offsets through +/-0.5 m
   ground-height offsets through +/-0.20 m
 ```
 
-V3.1 has not yet been re-accepted for randomized friction or reset noise. The
-last accepted v2 checkpoint still owns those broader robustness claims.
+V3.1 has not yet been re-accepted for reset noise. The last accepted v2
+checkpoint still owns the RN-1/RN-2 reset-noise claim.
 
 V3.1 fixed `mu=0.8`, clean reset confirmation:
 
@@ -50,6 +50,21 @@ ground-height offsets: -0.20, -0.10, +0.10, +0.20 m, 30/30 nominal each
 worst coordinate-screen drift: 0.000288 m
 worst coordinate-screen slip: 0.008764 m
 switches: 0 in every screen
+```
+
+V3.1 friction keeper confirmation passed without extra PPO training. Each row
+below is a fixed effective-friction slice using the same checkpoint, clean reset,
+flat terrain, `foot_friction=2.0`, and `action_filter_tau=0.05`:
+
+```text
+mu   episodes  nominal  drift_m   slip_m    switches  min_load_N  max_friction_usage  worst_foot
+0.5  100       100/100   0.000201  0.007565  0         26.946      0.034239            RR
+0.6  100       100/100   0.000200  0.007615  0         26.951      0.026631            RR
+0.8  100       100/100   0.000215  0.007392  0         26.977      0.025404            RR
+0.9  100       100/100   0.000215  0.007392  0         26.977      0.022581            RR
+1.0  100       100/100   0.000215  0.007392  0         26.977      0.020323            RR
+1.1  100       100/100   0.000215  0.007392  0         26.977      0.018476            RR
+1.2  100       100/100   0.000215  0.007392  0         26.977      0.016936            RR
 ```
 
 ## Last Accepted V2 Result
@@ -132,6 +147,12 @@ Run a coordinate-invariance check:
 python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --spawn-x 0.5 --spawn-z 0.5 --out diagnostics/v3p1_fixed08_005k_spawn_x0p5_z0p5_confirm30
 ```
 
+Reproduce the low-friction edge of the accepted V3.1 range:
+
+```bash
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.5 --friction-max 0.5 --episodes 100 --max-steps 5000 --action-filter-tau 0.05 --reset-noise-level clean --reset-noise-components combined --out diagnostics/v3p1_friction_keeper_mu_0p5_confirm100
+```
+
 ## Reward And Control
 
 The active v3.1 reward rewards survival/uprightness and penalizes tilt, pose
@@ -202,6 +223,8 @@ Key issues and where they are documented:
   [ADR-015](docs/experiments/fixed_friction_standing.md#adr-015-relative-state-standing-v3-attempt-stopped-at-fixed-mu-gate)
 - V3.1 recovery with relative observation, filter-state input, and slip-aligned
   reward: [ADR-016](docs/experiments/fixed_friction_standing.md#adr-016-v31-filter-state-and-slip-aligned-reward)
+- V3.1 friction `0.5-1.2` accepted without extra training:
+  [ADR-017](docs/experiments/fixed_friction_standing.md#adr-017-v31-friction-robustness-passed-without-ppo-training)
 
 ## Docs Map
 
@@ -235,19 +258,17 @@ docs/                      decision logs and reproducibility notes
 
 ## Next Work
 
-Friction robustness and RN-1/RN-2 reset-state robustness are accepted for flat
-terrain for the v2 baseline. V3.1 now recovers clean fixed-friction standing
-without absolute world XYZ in the policy observation. The next step is to
-re-run the friction and reset-noise gates on v3.1 before observation noise.
+Friction robustness is now accepted for v3.1. RN-1/RN-2 reset-state robustness
+is still accepted only for the v2 baseline. The next step is to re-run the
+reset-noise gates on v3.1 before observation noise.
 
 Next sequence:
 
 ```text
-1. re-check friction slices for v3.1
-2. re-check reset-noise gates for v3.1
-3. add observation noise
-4. move to SCM/deformable terrain bridge
-5. build locomotion policies
+1. re-check reset-noise gates for v3.1
+2. add observation noise
+3. move to SCM/deformable terrain bridge
+4. build locomotion policies
 ```
 
 Every new checkpoint should be rechecked on fixed friction slices before it is

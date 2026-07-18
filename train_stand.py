@@ -13,16 +13,23 @@ from go1_env import Go1Env, standing_env_metadata
 from project_config import DEFAULT_CHECKPOINT_FREQ, SB3_DEVICE
 
 
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
     parser.add_argument("--friction-min", type=float, default=0.8)
     parser.add_argument("--friction-max", type=float, default=0.8)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
     parser.add_argument("--timesteps", type=int, default=100_000)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--save-dir", type=Path, default=Path("runs/stand"))
     parser.add_argument("--load", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument(
         "--action-filter-tau",
         type=float,
@@ -63,6 +70,9 @@ def make_env(args):
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
         action_filter_tau=args.action_filter_tau,
+        reset_noise_level=args.reset_noise_level,
+        reset_noise_components=args.reset_noise_components,
+        ground_height_offset=args.ground_height_offset,
     )
     return Monitor(env)
 

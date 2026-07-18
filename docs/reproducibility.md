@@ -3,8 +3,8 @@
 This file gives copy-paste commands for the Chrono Go1 standing workflow.
 The active worktree now uses the v3.1 65D relative-state observation, so old v2
 checkpoints are shape-incompatible with active code. V3.1 is accepted for fixed
-`mu=0.8` clean standing plus coordinate-invariance screens; v2 remains the last
-accepted friction/reset-noise robust result.
+`mu=0.8` clean standing, coordinate-invariance screens, and fixed effective
+friction `mu=0.5-1.2`; v2 remains the last accepted reset-noise robust result.
 
 For the full command lineage from an untrained policy to the current v3.1
 branch, see [reproduction_ladder.md](reproduction_ladder.md).
@@ -67,7 +67,7 @@ required control setup:
   foot_friction = 2.0
 ```
 
-Accepted v3.1 fixed-standing confirmation:
+Accepted v3.1 fixed-standing and friction confirmation:
 
 ```text
 fixed mu=0.8, clean reset
@@ -78,6 +78,15 @@ settled_base_displacement_from_active_ref: 0.000207 m
 settled_total_contact_foot_slip_distance: 0.007678 m
 settled_total_contact_switches: 0
 settled_min_foot_load: 26.95 N
+
+friction slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+episodes: 100 per slice
+failure_type_counts: {'nominal': 100} on every slice
+worst settled_base_displacement_from_active_ref: 0.000215 m
+worst settled_total_contact_foot_slip_distance: 0.007615 m
+settled_total_contact_switches: 0 on every slice
+worst settled_min_foot_load: 26.95 N
+max settled friction usage: 0.03424
 ```
 
 Accepted coordinate-invariance screens:
@@ -107,6 +116,45 @@ Coordinate check:
 python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --spawn-x 0.5 --spawn-z 0.5 --out diagnostics/v3p1_fixed08_005k_spawn_x0p5_z0p5_confirm30
 python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --ground-height-offset 0.2 --out diagnostics/v3p1_fixed08_005k_ground_h0p20_confirm30
 ```
+
+## Reproduce V3.1 Friction Keeper
+
+Chrono's SMC contact setup combines ground and foot friction with
+`min(ground, foot)`. The active foot friction is `2.0`, so the ground values
+below are also the effective friction values. The expected output folders are
+`diagnostics/v3p1_friction_keeper_mu_*_confirm100`.
+
+```bash
+for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
+  SAFE_MU=${MU/./p}
+  python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip \
+    --terrain flat \
+    --friction-min "$MU" \
+    --friction-max "$MU" \
+    --episodes 100 \
+    --max-steps 5000 \
+    --action-filter-tau 0.05 \
+    --reset-noise-level clean \
+    --reset-noise-components combined \
+    --out "diagnostics/v3p1_friction_keeper_mu_${SAFE_MU}_confirm100"
+done
+```
+
+Accepted keeper rows:
+
+```text
+mu   episodes  nominal  drift_m   slip_m    switches  min_load_N  max_friction_usage
+0.5  100       100/100   0.000201  0.007565  0         26.946      0.034239
+0.6  100       100/100   0.000200  0.007615  0         26.951      0.026631
+0.8  100       100/100   0.000215  0.007392  0         26.977      0.025404
+0.9  100       100/100   0.000215  0.007392  0         26.977      0.022581
+1.0  100       100/100   0.000215  0.007392  0         26.977      0.020323
+1.1  100       100/100   0.000215  0.007392  0         26.977      0.018476
+1.2  100       100/100   0.000215  0.007392  0         26.977      0.016936
+```
+
+For the full friction margin and action smoothness table, see
+[ADR-017](experiments/fixed_friction_standing.md#adr-017-v31-friction-robustness-passed-without-ppo-training).
 
 ## Last Accepted V2 Friction/Reset Baseline
 

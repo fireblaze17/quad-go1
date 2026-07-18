@@ -429,9 +429,79 @@ worst coordinate-screen drift: 0.000288 m
 worst coordinate-screen slip: 0.008764 m
 ```
 
-Next reproduction steps for v3.1 are to repeat Stage 6 friction slices and
-Stage 7 reset-noise screens with the v3.1 checkpoint before adding observation
-noise.
+## Stage 9: V3.1 Effective Friction 0.5-1.2
+
+V3.1 was evaluated first instead of immediately fine-tuned. The v2 project
+history showed that extra PPO training can degrade standing, so the gate was:
+train only if fixed friction slices fail.
+
+Source checkpoint:
+
+```text
+runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
+```
+
+One reward implementation cleanup was made before evaluation: the remaining
+hard settled-quality early return was removed. The same ramped scales are used
+instead:
+
+```text
+load quality ramp:   clip(step / 50, 0, 1)
+stance quality ramp: clip(step / 100, 0, 1)
+```
+
+Reference-dependent anchor/base penalties remain zero before the step-100
+standing reference exists; direct loaded-foot slip and contact-switch terms
+ramp smoothly from the start.
+
+Screening command:
+
+```bash
+for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
+  SAFE_MU=${MU/./p}
+  python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min "$MU" --friction-max "$MU" --episodes 30 --max-steps 5000 --action-filter-tau 0.05 --reset-noise-level clean --reset-noise-components combined --out "diagnostics/v3p1_friction_bridge_mu_${SAFE_MU}_screen30"
+done
+```
+
+Keeper command:
+
+```bash
+for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
+  SAFE_MU=${MU/./p}
+  python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min "$MU" --friction-max "$MU" --episodes 100 --max-steps 5000 --action-filter-tau 0.05 --reset-noise-level clean --reset-noise-components combined --out "diagnostics/v3p1_friction_keeper_mu_${SAFE_MU}_confirm100"
+done
+```
+
+Result:
+
+```text
+100/100 nominal on every fixed slice
+slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
+worst active-reference drift: 0.000215 m
+worst settled total contact foot slip: 0.007615 m
+contact switches: 0 on every slice
+worst settled min foot load: 26.95 N
+max settled friction usage: 0.03424
+max non-foot load: 0.0
+```
+
+Per-slice keeper table:
+
+```text
+mu   episodes  nominal  drift_m   slip_m    switches  min_load_N  max_friction_usage
+0.5  100       100/100   0.000201  0.007565  0         26.946      0.034239
+0.6  100       100/100   0.000200  0.007615  0         26.951      0.026631
+0.8  100       100/100   0.000215  0.007392  0         26.977      0.025404
+0.9  100       100/100   0.000215  0.007392  0         26.977      0.022581
+1.0  100       100/100   0.000215  0.007392  0         26.977      0.020323
+1.1  100       100/100   0.000215  0.007392  0         26.977      0.018476
+1.2  100       100/100   0.000215  0.007392  0         26.977      0.016936
+```
+
+Decision: accept the v3.1 5k checkpoint as effective-friction robust through
+`mu=0.5-1.2` without additional PPO training. Next reproduction step is to
+repeat Stage 7 reset-noise screens with this v3.1 checkpoint before adding
+observation noise.
 
 ## Acceptance Pattern
 

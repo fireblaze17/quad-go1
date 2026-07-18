@@ -26,10 +26,12 @@ FRICTION_050_120_MODEL = FRICTION_050_120_DIR / "checkpoints" / "stand_policy_10
 LAST_ACCEPTED_V2_MODEL = FRICTION_050_120_MODEL
 V3_RELATIVE_FIXED08_ATTEMPT_MODEL = V3_RELATIVE_FIXED08_DIR / "checkpoints" / "stand_policy_25000_steps.zip"
 V3P1_RELATIVE_FIXED08_MODEL = V3P1_RELATIVE_FIXED08_DIR / "checkpoints" / "stand_policy_5000_steps.zip"
+V3P1_FRICTION_ROBUST_MODEL = V3P1_RELATIVE_FIXED08_MODEL
 
-# Active code now uses the v3.1 65D relative-state observation. V2 checkpoints
-# remain the last accepted friction/reset-noise robust result, but they are
-# shape-incompatible with this worktree.
-CURRENT_BASELINE_MODEL = V3P1_RELATIVE_FIXED08_MODEL
+# Active code now uses the v3.1 65D relative-state observation. This checkpoint
+# is accepted for fixed standing, coordinate invariance, and effective friction
+# 0.5-1.2. V2 remains the last accepted reset-noise robust result, but its
+# checkpoints are shape-incompatible with this worktree.
+CURRENT_BASELINE_MODEL = V3P1_FRICTION_ROBUST_MODEL
 
 DEFAULT_VIEWER_FRICTION_RANGE = (0.8, 0.8)

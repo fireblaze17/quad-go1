@@ -4,9 +4,11 @@ The project uses Chrono as the simulator and MuJoCo Menagerie only as a source
 of model/reference values that are known to be sane for Go1. Chrono runs here in
 a Y-up world, so the imported ROS-style Z-up URDF is rotated at the root.
 
-Observation, 37 float32 values:
-    trunk position, trunk quaternion, trunk linear velocity,
-    trunk angular velocity, 12 joint angles, 12 joint velocities.
+Observation, 65 float32 values:
+    trunk height relative to support/ground, trunk quaternion, trunk linear
+    velocity, trunk angular velocity, 12 joint angles, 12 joint velocities,
+    previous executed action, support-relative standing errors, foot loads, and
+    contact flags.
 
 Action, 12 float32 values in [-1, 1]:
     normalized joint-position offsets around the nominal standing pose.
@@ -48,7 +50,7 @@ _MATERIAL_COMPOSITION_RULE = "min"
 # (hip=0, thigh=0.9, calf=-1.8 at y=0.27) slowly sank in Chrono. This less
 # crouched pose starts at its natural support height and holds with zero action.
 _SPAWN_HEIGHT = 0.34  # trunk root height; DoAssembly drives legs to home before first step
-_TERM_HEIGHT = 0.22
+_TERM_RELATIVE_HEIGHT = 0.22
 _MIN_UPRIGHT_ALIGNMENT = 0.85
 _UPRIGHT_REWARD_WEIGHT = 0.15
 _ALIVE_BONUS = 1.0  # reward per surviving step; terrain-agnostic
@@ -58,19 +60,81 @@ _ANG_VEL_PENALTY_WEIGHT = 0.01
 _XZ_VEL_PENALTY_WEIGHT = 1.00
 _JOINT_VEL_PENALTY_WEIGHT = 0.02
 _ACTION_RATE_PENALTY_WEIGHT = 0.05
+_RAW_ACTION_RATE_PENALTY_WEIGHT = 0.02
+_FILTER_LAG_PENALTY_WEIGHT = 0.02
 _TILT_PENALTY_WEIGHT = 0.25
 _FOOT_CONTACT_PENALTY_WEIGHT = 2.00
-_FOOT_SLIP_PENALTY_WEIGHT = 0.00
-_FOOT_ANCHOR_PENALTY_WEIGHT = 5.00
+_FOOT_CONTACT_MEAN_WEIGHT = 1.00
+_FOOT_CONTACT_WORST_WEIGHT = 2.00
+_TARGET_FOOT_LOAD = 25.0
+_FOOT_SLIP_PENALTY_WEIGHT = 50.00
+_FOOT_SLIP_GATE_TOTAL = 0.03
+_FOOT_SLIP_STEP_NOISE_FLOOR = 1e-5
+_FOOT_ANCHOR_PENALTY_WEIGHT = 0.10
 _FOOT_ANCHOR_DEADBAND = 0.005
 _FOOT_ANCHOR_CONTACT_ON_LOAD = 15.0
 _FOOT_ANCHOR_CONTACT_OFF_LOAD = 5.0
 _FOOT_ANCHOR_CONTACT_OFF_FRAMES = 5
-_BASE_DRIFT_PENALTY_WEIGHT = 2.00
+_BASE_DRIFT_PENALTY_WEIGHT = 0.05
 _BASE_DRIFT_DEADBAND = 0.01
+_CONTACT_SWITCH_PENALTY_WEIGHT = 0.10
+_CONTACT_SWITCH_ON_LOAD = 22.0
+_CONTACT_SWITCH_OFF_LOAD = 18.0
+_ANCHOR_RESET_PENALTY_WEIGHT = 0.50
+_ANCHOR_DEACTIVATION_PENALTY_WEIGHT = 1.00
+_OBS_ERROR_SCALE = 0.03
 _STANDING_QUALITY_START_STEP = 100
+_LOAD_QUALITY_RAMP_STEPS = 50
+_STANCE_QUALITY_RAMP_STEPS = 100
 _MIN_FOOT_LOAD = 20.0
 _ANCHOR_LOAD_THRESHOLDS = (20.0, 15.0, 8.0, 5.0)
+_RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+_RESET_NOISE_COMPONENTS = (
+    "combined",
+    "joint_pos",
+    "joint_vel",
+    "roll_pitch",
+    "base_height",
+    "base_velocity",
+)
+_RESET_NOISE_SPECS = {
+    "clean": {
+        "base_height": 0.0,
+        "roll_pitch_deg": 0.0,
+        "joint_pos": 0.0,
+        "joint_vel": 0.0,
+        "base_linear_xz": 0.0,
+        "base_linear_y": 0.0,
+        "base_angular_xz": 0.0,
+    },
+    "rn1": {
+        "base_height": 0.005,
+        "roll_pitch_deg": 1.0,
+        "joint_pos": 0.02,
+        "joint_vel": 0.05,
+        "base_linear_xz": 0.02,
+        "base_linear_y": 0.005,
+        "base_angular_xz": 0.05,
+    },
+    "rn2": {
+        "base_height": 0.010,
+        "roll_pitch_deg": 2.0,
+        "joint_pos": 0.04,
+        "joint_vel": 0.15,
+        "base_linear_xz": 0.05,
+        "base_linear_y": 0.02,
+        "base_angular_xz": 0.10,
+    },
+    "rn3": {
+        "base_height": 0.015,
+        "roll_pitch_deg": 4.0,
+        "joint_pos": 0.08,
+        "joint_vel": 0.30,
+        "base_linear_xz": 0.10,
+        "base_linear_y": 0.05,
+        "base_angular_xz": 0.20,
+    },
+}
 
 # Zero action holds this home control pose.
 _HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
@@ -117,6 +181,7 @@ def standing_env_metadata() -> dict:
     return {
         "time_step": _TIME_STEP,
         "spawn_height": _SPAWN_HEIGHT,
+        "termination_relative_height": _TERM_RELATIVE_HEIGHT,
         "home_joint_angles": _HOME_JOINT_ANGLES.tolist(),
         "action_scale": _ACTION_SCALE,
         "collision_bodies": list(_ROBOT_COLLISION_BODIES),
@@ -127,21 +192,43 @@ def standing_env_metadata() -> dict:
             "control": _CONTROL_PENALTY_WEIGHT,
             "joint_velocity": _JOINT_VEL_PENALTY_WEIGHT,
             "action_rate": _ACTION_RATE_PENALTY_WEIGHT,
+            "raw_action_rate": _RAW_ACTION_RATE_PENALTY_WEIGHT,
+            "filter_lag": _FILTER_LAG_PENALTY_WEIGHT,
             "tilt": _TILT_PENALTY_WEIGHT,
             "angular_velocity": _ANG_VEL_PENALTY_WEIGHT,
             "xz_velocity": _XZ_VEL_PENALTY_WEIGHT,
             "foot_contact": _FOOT_CONTACT_PENALTY_WEIGHT,
+            "foot_contact_mean": _FOOT_CONTACT_MEAN_WEIGHT,
+            "foot_contact_worst": _FOOT_CONTACT_WORST_WEIGHT,
             "foot_slip": _FOOT_SLIP_PENALTY_WEIGHT,
             "foot_anchor": _FOOT_ANCHOR_PENALTY_WEIGHT,
             "base_drift": _BASE_DRIFT_PENALTY_WEIGHT,
+            "contact_switch": _CONTACT_SWITCH_PENALTY_WEIGHT,
+            "anchor_reset": _ANCHOR_RESET_PENALTY_WEIGHT,
+            "anchor_deactivation": _ANCHOR_DEACTIVATION_PENALTY_WEIGHT,
         },
         "minimum_foot_load": _MIN_FOOT_LOAD,
+        "target_foot_load": _TARGET_FOOT_LOAD,
+        "foot_slip_gate_total": _FOOT_SLIP_GATE_TOTAL,
+        "foot_slip_step_noise_floor": _FOOT_SLIP_STEP_NOISE_FLOOR,
         "foot_anchor_deadband": _FOOT_ANCHOR_DEADBAND,
         "foot_anchor_contact_on_load": _FOOT_ANCHOR_CONTACT_ON_LOAD,
         "foot_anchor_contact_off_load": _FOOT_ANCHOR_CONTACT_OFF_LOAD,
         "foot_anchor_contact_off_frames": _FOOT_ANCHOR_CONTACT_OFF_FRAMES,
         "base_drift_deadband": _BASE_DRIFT_DEADBAND,
+        "contact_switch_on_load": _CONTACT_SWITCH_ON_LOAD,
+        "contact_switch_off_load": _CONTACT_SWITCH_OFF_LOAD,
+        "observation_error_scale": _OBS_ERROR_SCALE,
         "standing_quality_start_step": _STANDING_QUALITY_START_STEP,
+        "load_quality_ramp_steps": _LOAD_QUALITY_RAMP_STEPS,
+        "stance_quality_ramp_steps": _STANCE_QUALITY_RAMP_STEPS,
+        "reset_noise_levels": _RESET_NOISE_SPECS,
+        "reset_noise_components": list(_RESET_NOISE_COMPONENTS),
+        "reset_noise_notes": {
+            "base_xz_translation": "disabled for standing reset-noise training",
+            "yaw": "disabled for standing reset-noise training",
+            "joint_velocity": "implemented as small child-link angular velocity perturbations in Chrono",
+        },
         "solver": {
             "type": "BARZILAIBORWEIN",
             "max_iterations": 60,
@@ -217,10 +304,19 @@ class Go1Env(gym.Env):
         enable_motors: bool = True,
         friction_range: tuple[float, float] = (0.8, 0.8),
         action_filter_tau: float | None = None,
+        reset_noise_level: str = "clean",
+        reset_noise_components: str = "combined",
+        spawn_x: float = 0.0,
+        spawn_z: float = 0.0,
+        ground_height_offset: float = 0.0,
     ):
         super().__init__()
         if terrain not in ("flat", "scm"):
             raise ValueError("terrain must be 'flat' or 'scm'")
+        if reset_noise_level not in _RESET_NOISE_LEVELS:
+            raise ValueError(f"reset_noise_level must be one of {_RESET_NOISE_LEVELS}")
+        if reset_noise_components not in _RESET_NOISE_COMPONENTS:
+            raise ValueError(f"reset_noise_components must be one of {_RESET_NOISE_COMPONENTS}")
         if len(friction_range) != 2:
             raise ValueError("friction_range must be a (min, max) pair")
         friction_min, friction_max = friction_range
@@ -235,6 +331,10 @@ class Go1Env(gym.Env):
         self.enable_motors = enable_motors
         self.friction_range = (float(friction_min), float(friction_max))
         self.action_filter_tau = None if action_filter_tau is None else float(action_filter_tau)
+        self.reset_noise_level = reset_noise_level
+        self.reset_noise_components = reset_noise_components
+        self.spawn_xz = np.array([float(spawn_x), float(spawn_z)], dtype=np.float32)
+        self.ground_height_offset = float(ground_height_offset)
         self.action_filter_alpha = (
             None
             if self.action_filter_tau is None
@@ -244,7 +344,7 @@ class Go1Env(gym.Env):
         self.home_joint_angles = _HOME_JOINT_ANGLES.copy()
 
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(37,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(65,), dtype=np.float32
         )
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(12,), dtype=np.float32
@@ -262,16 +362,21 @@ class Go1Env(gym.Env):
         self._action_filter_initialized = False
         self._reset_base_xz = np.zeros(2, dtype=np.float32)
         self._base_anchor_xz = np.zeros(2, dtype=np.float32)
+        self._base_anchor_yaw = 0.0
         self._foot_anchor_xz = np.zeros((len(_FOOT_BODY_NAMES), 2), dtype=np.float32)
         self._foot_anchor_active = np.zeros(len(_FOOT_BODY_NAMES), dtype=bool)
         self._foot_anchor_off_frames = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
         self._foot_anchor_reset_counts = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
         self._foot_anchor_deactivate_counts = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
+        self._prev_foot_xz = np.zeros((len(_FOOT_BODY_NAMES), 2), dtype=np.float32)
+        self._reward_contact_active = np.zeros(len(_FOOT_BODY_NAMES), dtype=bool)
         self._foot_load_below_counts = {
             threshold: np.zeros(len(_FOOT_BODY_NAMES), dtype=np.int32)
             for threshold in _ANCHOR_LOAD_THRESHOLDS
         }
         self._standing_reference_captured = False
+        self._reset_noise_sample = self._zero_reset_noise_sample()
+        self._reset_joint_targets = self.home_joint_angles.copy()
         self.step_count = 0
 
         self._build_sim()
@@ -313,9 +418,80 @@ class Go1Env(gym.Env):
         self._trunk.SetFixed(True)
         system.DoAssembly(1)
         self._trunk.SetFixed(False)
+        self._apply_reset_velocity_noise()
+        self._restore_home_motor_targets()
+        self._prev_foot_xz = self._foot_xz_positions()
+        self._reward_contact_active = self._foot_loads() >= _MIN_FOOT_LOAD
 
         if self.render_mode == "human":
             self._create_visualizer(system)
+
+    def _zero_reset_noise_sample(self) -> dict:
+        zeros12 = [0.0] * 12
+        return {
+            "enabled": False,
+            "level": "clean",
+            "components": "combined",
+            "base_height_offset": 0.0,
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0,
+            "joint_position_offsets": zeros12.copy(),
+            "joint_velocity_offsets": zeros12.copy(),
+            "base_linear_velocity": [0.0, 0.0, 0.0],
+            "base_angular_velocity": [0.0, 0.0, 0.0],
+            "initial_foot_y": {name.split("_")[0]: 0.0 for name in _FOOT_BODY_NAMES},
+            "initial_min_foot_y": 0.0,
+            "initial_max_foot_y": 0.0,
+            "initial_foot_loads": {name.split("_")[0]: 0.0 for name in _FOOT_BODY_NAMES},
+            "initial_max_foot_load": 0.0,
+        }
+
+    def _component_enabled(self, component: str) -> bool:
+        return self.reset_noise_components in ("combined", component)
+
+    def _sample_reset_noise(self) -> None:
+        spec = _RESET_NOISE_SPECS[self.reset_noise_level]
+        sample = self._zero_reset_noise_sample()
+        sample["enabled"] = self.reset_noise_level != "clean"
+        sample["level"] = self.reset_noise_level
+        sample["components"] = self.reset_noise_components
+
+        if self._component_enabled("base_height"):
+            sample["base_height_offset"] = float(self.np_random.uniform(-spec["base_height"], spec["base_height"]))
+        if self._component_enabled("roll_pitch"):
+            limit = math.radians(spec["roll_pitch_deg"])
+            sample["roll"] = float(self.np_random.uniform(-limit, limit))
+            sample["pitch"] = float(self.np_random.uniform(-limit, limit))
+        if self._component_enabled("joint_pos"):
+            limit = spec["joint_pos"]
+            offsets = self.np_random.uniform(-limit, limit, size=12).astype(np.float32)
+            targets = np.clip(self.home_joint_angles + offsets, _JOINT_LOW, _JOINT_HIGH)
+            offsets = targets - self.home_joint_angles
+            sample["joint_position_offsets"] = offsets.astype(float).tolist()
+            self._reset_joint_targets = targets.astype(np.float32)
+        else:
+            self._reset_joint_targets = self.home_joint_angles.copy()
+        if self._component_enabled("joint_vel"):
+            limit = spec["joint_vel"]
+            sample["joint_velocity_offsets"] = (
+                self.np_random.uniform(-limit, limit, size=12).astype(float).tolist()
+            )
+        if self._component_enabled("base_velocity"):
+            xz = spec["base_linear_xz"]
+            y = spec["base_linear_y"]
+            angular = spec["base_angular_xz"]
+            sample["base_linear_velocity"] = [
+                float(self.np_random.uniform(-xz, xz)),
+                float(self.np_random.uniform(-y, y)),
+                float(self.np_random.uniform(-xz, xz)),
+            ]
+            sample["base_angular_velocity"] = [
+                float(self.np_random.uniform(-angular, angular)),
+                0.0,
+                float(self.np_random.uniform(-angular, angular)),
+            ]
+        self._reset_noise_sample = sample
 
     def _sample_ground_friction(self) -> float:
         friction_min, friction_max = self.friction_range
@@ -328,7 +504,7 @@ class Go1Env(gym.Env):
         # robot/world convention used throughout this repo.
         terrain.SetReferenceFrame(
             chrono.ChCoordsysd(
-                chrono.ChVector3d(0, 0, 0),
+                chrono.ChVector3d(0, self.ground_height_offset, 0),
                 chrono.QuatFromAngleX(-math.pi / 2),
             )
         )
@@ -358,17 +534,58 @@ class Go1Env(gym.Env):
 
         ground = chrono.ChBodyEasyBox(10, 0.2, 10, 1000, True, True, ground_mat)
         ground.SetFixed(True)
-        ground.SetPos(chrono.ChVector3d(0, -0.1, 0))
+        ground.SetPos(chrono.ChVector3d(0, -0.1 + self.ground_height_offset, 0))
         _set_visual_color(ground, chrono.ChColor(0.05, 0.05, 0.05))
         system.AddBody(ground)
+
+    def _ground_top_y(self) -> float:
+        return float(self.ground_height_offset)
+
+    def _base_world_pos(self) -> np.ndarray:
+        pos = self._trunk.GetPos()
+        return np.array([float(pos.x), float(pos.y), float(pos.z)], dtype=np.float32)
+
+    def _base_relative_height(self) -> float:
+        return float(self._trunk.GetPos().y - self._ground_top_y())
+
+    def _trunk_yaw(self) -> float:
+        forward = self._trunk.GetRot().Rotate(chrono.ChVector3d(1, 0, 0))
+        return float(math.atan2(float(forward.z), float(forward.x)))
+
+    def _to_support_frame(self, vectors_xz: np.ndarray) -> np.ndarray:
+        """Rotate world X/Z vectors into the captured standing support frame."""
+        vectors = np.asarray(vectors_xz, dtype=np.float32)
+        yaw = -float(self._base_anchor_yaw)
+        c = math.cos(yaw)
+        s = math.sin(yaw)
+        rot = np.array([[c, -s], [s, c]], dtype=np.float32)
+        return vectors @ rot.T
+
+    def _foot_loads(self) -> np.ndarray:
+        return np.array(
+            [abs(float(foot.GetContactForce().y)) for foot in self._feet],
+            dtype=np.float32,
+        )
 
     def _create_robot_parser(self):
         parser = parsers.ChParserURDF(str(_URDF))
         parser.EnableCollisionVisualization()
+        reset_roll = float(self._reset_noise_sample["roll"])
+        reset_pitch = float(self._reset_noise_sample["pitch"])
+        reset_height = (
+            self._ground_top_y()
+            + _SPAWN_HEIGHT
+            + float(self._reset_noise_sample["base_height_offset"])
+        )
+        root_rot = (
+            chrono.QuatFromAngleX(reset_roll)
+            * chrono.QuatFromAngleZ(reset_pitch)
+            * chrono.QuatFromAngleX(-math.pi / 2)
+        )
         parser.SetRootInitPose(
             chrono.ChFramed(
-                chrono.ChVector3d(0, _SPAWN_HEIGHT, 0),
-                chrono.QuatFromAngleX(-math.pi / 2),
+                chrono.ChVector3d(float(self.spawn_xz[0]), reset_height, float(self.spawn_xz[1])),
+                root_rot,
             )
         )
         parser.SetAllBodiesMeshCollisionType(
@@ -424,7 +641,7 @@ class Go1Env(gym.Env):
         # — no ramp needed, matching SBEL's Go2 actuate() pattern.
         self._motor_funcs = []
         for i, motor in enumerate(self._motors):
-            function = chrono.ChFunctionConst(float(self.home_joint_angles[i]))
+            function = chrono.ChFunctionConst(float(self._reset_joint_targets[i]))
             motor.SetMotorFunction(function)
             self._motor_funcs.append(function)
 
@@ -435,6 +652,41 @@ class Go1Env(gym.Env):
             [(motor.GetBody1(), motor.GetBody2()) for motor in self._motors]
             if self.enable_motors else []
         )
+
+    def _restore_home_motor_targets(self) -> None:
+        for function, target in zip(self._motor_funcs, self.home_joint_angles):
+            function.SetConstant(float(target))
+
+    def _apply_reset_velocity_noise(self) -> None:
+        lin_vel = self._reset_noise_sample["base_linear_velocity"]
+        ang_vel = self._reset_noise_sample["base_angular_velocity"]
+        self._trunk.SetLinVel(chrono.ChVector3d(float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2])))
+        self._trunk.SetAngVelParent(chrono.ChVector3d(float(ang_vel[0]), float(ang_vel[1]), float(ang_vel[2])))
+
+        if not self._joint_body_pairs:
+            return
+        joint_vel_offsets = self._reset_noise_sample["joint_velocity_offsets"]
+        for index, (_, child_body) in enumerate(self._joint_body_pairs):
+            axis_idx = int(_JOINT_AXES[index])
+            sign = float(_JOINT_AXIS_SIGN[index])
+            velocity_component = sign * float(joint_vel_offsets[index])
+            current = child_body.GetAngVelParent()
+            updated = [float(current.x), float(current.y), float(current.z)]
+            updated[axis_idx] += velocity_component
+            child_body.SetAngVelParent(chrono.ChVector3d(updated[0], updated[1], updated[2]))
+
+    def _record_initial_reset_diagnostics(self) -> None:
+        foot_y = {}
+        foot_loads = {}
+        for name, foot in zip(_FOOT_BODY_NAMES, self._feet):
+            leg = name.split("_")[0]
+            foot_y[leg] = float(foot.GetPos().y)
+            foot_loads[leg] = abs(float(foot.GetContactForce().y))
+        self._reset_noise_sample["initial_foot_y"] = foot_y
+        self._reset_noise_sample["initial_min_foot_y"] = float(min(foot_y.values(), default=0.0))
+        self._reset_noise_sample["initial_max_foot_y"] = float(max(foot_y.values(), default=0.0))
+        self._reset_noise_sample["initial_foot_loads"] = foot_loads
+        self._reset_noise_sample["initial_max_foot_load"] = float(max(foot_loads.values(), default=0.0))
 
     def _create_visualizer(self, system) -> None:
         # Always create a fresh visualizer. Reusing an initialized Irrlicht
@@ -479,7 +731,6 @@ class Go1Env(gym.Env):
         return sign * float(components[axis_idx])
 
     def _get_obs(self) -> np.ndarray:
-        pos = self._trunk.GetPos()
         rot = self._trunk.GetRot()  # Chrono stores w, x, y, z as e0..e3.
         lin_vel = self._trunk.GetPosDt()
         ang_vel = self._trunk.GetAngVelParent()
@@ -506,13 +757,33 @@ class Go1Env(gym.Env):
         else:
             joint_vel = np.zeros(12, dtype=np.float32)
 
+        if self._standing_reference_captured:
+            base_world = self._base_world_pos()
+            base_xz = np.array([base_world[0], base_world[2]], dtype=np.float32)
+            base_error = self._to_support_frame(base_xz - self._base_anchor_xz) / _OBS_ERROR_SCALE
+            foot_errors = self._to_support_frame(self._foot_xz_positions() - self._foot_anchor_xz)
+            foot_errors[~self._foot_anchor_active] = 0.0
+            foot_errors = foot_errors.reshape(-1) / _OBS_ERROR_SCALE
+        else:
+            base_error = np.zeros(2, dtype=np.float32)
+            foot_errors = np.zeros(8, dtype=np.float32)
+
+        foot_loads = self._foot_loads()
+        normalized_loads = np.clip(foot_loads / _MIN_FOOT_LOAD, 0.0, 3.0).astype(np.float32)
+        contact_flags = (foot_loads >= _MIN_FOOT_LOAD).astype(np.float32)
+
         return np.concatenate([
-            [pos.x, pos.y, pos.z],
+            [self._base_relative_height()],
             [rot.e0, rot.e1, rot.e2, rot.e3],
             [lin_vel.x, lin_vel.y, lin_vel.z],
             [ang_vel.x, ang_vel.y, ang_vel.z],
             joint_pos,
             joint_vel,
+            self._prev_action,
+            base_error,
+            foot_errors,
+            normalized_loads,
+            contact_flags,
         ]).astype(np.float32)
 
     def _trunk_axis_alignments(self) -> dict[str, float]:
@@ -537,7 +808,10 @@ class Go1Env(gym.Env):
             "alive_bonus": _ALIVE_BONUS,
             "upright_score": float(upright_score),
             "upright_reward": float(upright_reward),
-            "trunk_y": float(obs[1]),
+            "trunk_y": float(self._trunk.GetPos().y),
+            "base_world_y": float(self._trunk.GetPos().y),
+            "base_relative_height": float(obs[0]),
+            "ground_top_y": self._ground_top_y(),
             "tilt_error": float(tilt_error),
             "tilt_penalty": float(tilt_penalty),
         }
@@ -547,7 +821,7 @@ class Go1Env(gym.Env):
         return float(reward), terms
 
     def _pose_reward_terms(self, obs: np.ndarray) -> tuple[float, dict]:
-        joint_pos = obs[13:25]
+        joint_pos = obs[11:23]
         pose_error = joint_pos - self.home_joint_angles
         pose_mse = float(np.mean(pose_error ** 2))
         pose_penalty = _POSE_PENALTY_WEIGHT * pose_mse
@@ -568,16 +842,23 @@ class Go1Env(gym.Env):
         return -float(pose_penalty), terms
 
     def _foot_contact_terms(self) -> tuple[float, dict]:
-        foot_loads = np.array(
-            [abs(float(foot.GetContactForce().y)) for foot in self._feet],
-            dtype=np.float32,
+        foot_loads = self._foot_loads()
+        load_quality_scale = float(np.clip(self.step_count / _LOAD_QUALITY_RAMP_STEPS, 0.0, 1.0))
+        missing_contact = np.maximum(0.0, _TARGET_FOOT_LOAD - foot_loads) / _TARGET_FOOT_LOAD
+        missing_squared = missing_contact ** 2
+        foot_contact_mean_error = float(np.mean(missing_squared))
+        foot_contact_worst_error = float(np.max(missing_squared))
+        foot_contact_error = (
+            _FOOT_CONTACT_MEAN_WEIGHT * foot_contact_mean_error
+            + _FOOT_CONTACT_WORST_WEIGHT * foot_contact_worst_error
         )
-        missing_contact = np.maximum(0.0, _MIN_FOOT_LOAD - foot_loads) / _MIN_FOOT_LOAD
-        foot_contact_error = float(np.mean(missing_contact ** 2))
-        foot_contact_penalty = _FOOT_CONTACT_PENALTY_WEIGHT * foot_contact_error
+        foot_contact_penalty = _FOOT_CONTACT_PENALTY_WEIGHT * load_quality_scale * foot_contact_error
         terms = {
             "foot_contact_error": float(foot_contact_error),
+            "foot_contact_mean_error": float(foot_contact_mean_error),
+            "foot_contact_worst_error": float(foot_contact_worst_error),
             "foot_contact_penalty": float(foot_contact_penalty),
+            "load_quality_scale": float(load_quality_scale),
             "min_foot_load": float(np.min(foot_loads)),
             "mean_foot_load": float(np.mean(foot_loads)),
         }
@@ -593,7 +874,9 @@ class Go1Env(gym.Env):
         )
 
     def _capture_standing_reference(self, obs: np.ndarray, foot_loads: np.ndarray) -> None:
-        self._base_anchor_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        base_world = self._base_world_pos()
+        self._base_anchor_xz = np.array([base_world[0], base_world[2]], dtype=np.float32)
+        self._base_anchor_yaw = self._trunk_yaw()
         self._foot_anchor_xz = self._foot_xz_positions()
         self._foot_anchor_active = foot_loads >= _FOOT_ANCHOR_CONTACT_ON_LOAD
         self._foot_anchor_off_frames.fill(0)
@@ -636,95 +919,147 @@ class Go1Env(gym.Env):
         return terms
 
     def _settled_standing_quality_terms(self, obs: np.ndarray) -> tuple[float, dict]:
-        foot_loads = np.array(
-            [abs(float(foot.GetContactForce().y)) for foot in self._feet],
-            dtype=np.float32,
-        )
+        foot_loads = self._foot_loads()
         for threshold in _ANCHOR_LOAD_THRESHOLDS:
             self._foot_load_below_counts[threshold] += (foot_loads < threshold).astype(np.int32)
 
-        base_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        base_world = self._base_world_pos()
+        base_xz = np.array([base_world[0], base_world[2]], dtype=np.float32)
+        foot_xz_positions = self._foot_xz_positions()
+        foot_step_displacements = np.linalg.norm(foot_xz_positions - self._prev_foot_xz, axis=1)
+        loaded_step_slip = (
+            (foot_loads >= _MIN_FOOT_LOAD).astype(np.float32)
+            * np.maximum(0.0, foot_step_displacements - _FOOT_SLIP_STEP_NOISE_FLOOR)
+        )
+        foot_slip_step = float(np.sum(loaded_step_slip))
+        foot_slip_error = float(foot_slip_step / _FOOT_SLIP_GATE_TOTAL)
+        foot_slip_penalty_unscaled = _FOOT_SLIP_PENALTY_WEIGHT * foot_slip_error
+
+        contact_switches_this_step = 0
+        next_contact_active = self._reward_contact_active.copy()
+        for index, load in enumerate(foot_loads):
+            if next_contact_active[index]:
+                if load <= _CONTACT_SWITCH_OFF_LOAD:
+                    next_contact_active[index] = False
+                    contact_switches_this_step += 1
+            elif load >= _CONTACT_SWITCH_ON_LOAD:
+                next_contact_active[index] = True
+                contact_switches_this_step += 1
+        self._reward_contact_active = next_contact_active
+
         foot_displacements = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.float32)
         foot_errors = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.float32)
+        foot_anchor_excess = np.zeros(len(_FOOT_BODY_NAMES), dtype=np.float32)
+        new_anchor_resets = 0
+        new_anchor_deactivations = 0
+        stance_quality_scale = float(np.clip(self.step_count / _STANCE_QUALITY_RAMP_STEPS, 0.0, 1.0))
 
-        if self.step_count <= _STANDING_QUALITY_START_STEP:
-            terms = {
-                "foot_slip_error": 0.0,
-                "foot_slip_penalty": 0.0,
-                "base_drift": 0.0,
-                "base_drift_error": 0.0,
-                "base_drift_penalty": 0.0,
-                "foot_anchor_error": 0.0,
-                "foot_anchor_penalty": 0.0,
-                "foot_anchor_active_count": 0.0,
-                "foot_anchor_max_displacement": 0.0,
-            }
-            terms.update(self._anchor_diagnostic_terms(foot_loads, foot_displacements, foot_errors, base_xz))
-            return 0.0, terms
-
-        if not self._standing_reference_captured:
+        if (
+            not self._standing_reference_captured
+            and self.step_count >= _STANDING_QUALITY_START_STEP
+        ):
             self._capture_standing_reference(obs, foot_loads)
 
-        foot_slip_error = 0.0
-        foot_anchor_error = 0.0
         foot_anchor_max_displacement = 0.0
-        for index, (foot, load) in enumerate(zip(self._feet, foot_loads)):
-            pos = foot.GetPos()
-            foot_xz = np.array([float(pos.x), float(pos.z)], dtype=np.float32)
-            if self._foot_anchor_active[index]:
-                if load <= _FOOT_ANCHOR_CONTACT_OFF_LOAD:
-                    self._foot_anchor_off_frames[index] += 1
-                    if self._foot_anchor_off_frames[index] >= _FOOT_ANCHOR_CONTACT_OFF_FRAMES:
-                        self._foot_anchor_active[index] = False
-                        self._foot_anchor_deactivate_counts[index] += 1
-                else:
+        if self._standing_reference_captured:
+            for index, (foot_xz, load) in enumerate(zip(foot_xz_positions, foot_loads)):
+                if self._foot_anchor_active[index]:
+                    if load <= _FOOT_ANCHOR_CONTACT_OFF_LOAD:
+                        self._foot_anchor_off_frames[index] += 1
+                        if self._foot_anchor_off_frames[index] >= _FOOT_ANCHOR_CONTACT_OFF_FRAMES:
+                            self._foot_anchor_active[index] = False
+                            self._foot_anchor_deactivate_counts[index] += 1
+                            new_anchor_deactivations += 1
+                    else:
+                        self._foot_anchor_off_frames[index] = 0
+                    displacement = float(np.linalg.norm(foot_xz - self._foot_anchor_xz[index]))
+                    foot_displacements[index] = displacement
+                    foot_anchor_max_displacement = max(foot_anchor_max_displacement, displacement)
+                    raw_error = max(0.0, displacement - _FOOT_ANCHOR_DEADBAND)
+                    foot_errors[index] = raw_error
+                    foot_anchor_excess[index] = max(0.0, displacement / _FOOT_ANCHOR_DEADBAND - 1.0)
+                elif load >= _FOOT_ANCHOR_CONTACT_ON_LOAD:
+                    self._foot_anchor_xz[index] = foot_xz
+                    self._foot_anchor_active[index] = True
                     self._foot_anchor_off_frames[index] = 0
-                displacement = float(np.linalg.norm(foot_xz - self._foot_anchor_xz[index]))
-                foot_displacements[index] = displacement
-                foot_anchor_max_displacement = max(foot_anchor_max_displacement, displacement)
-                error = max(0.0, displacement - _FOOT_ANCHOR_DEADBAND)
-                foot_errors[index] = error
-                foot_anchor_error += float(error ** 2)
-            elif load >= _FOOT_ANCHOR_CONTACT_ON_LOAD:
-                self._foot_anchor_xz[index] = foot_xz
-                self._foot_anchor_active[index] = True
-                self._foot_anchor_off_frames[index] = 0
-                self._foot_anchor_reset_counts[index] += 1
+                    self._foot_anchor_reset_counts[index] += 1
+                    new_anchor_resets += 1
 
-        foot_slip_penalty = _FOOT_SLIP_PENALTY_WEIGHT * foot_slip_error
-        foot_anchor_penalty = _FOOT_ANCHOR_PENALTY_WEIGHT * foot_anchor_error
+        foot_anchor_error = float(np.mean(foot_anchor_excess ** 2))
+        foot_anchor_penalty_unscaled = _FOOT_ANCHOR_PENALTY_WEIGHT * foot_anchor_error
 
-        base_drift = float(np.linalg.norm(base_xz - self._base_anchor_xz))
+        if self._standing_reference_captured:
+            base_drift = float(np.linalg.norm(base_xz - self._base_anchor_xz))
+        else:
+            base_drift = 0.0
         base_drift_error = max(0.0, base_drift - _BASE_DRIFT_DEADBAND)
-        base_drift_penalty = _BASE_DRIFT_PENALTY_WEIGHT * float(base_drift_error ** 2)
+        base_drift_normalized_error = max(0.0, base_drift / _BASE_DRIFT_DEADBAND - 1.0)
+        base_drift_penalty_unscaled = _BASE_DRIFT_PENALTY_WEIGHT * float(base_drift_normalized_error ** 2)
+        contact_switch_penalty_unscaled = _CONTACT_SWITCH_PENALTY_WEIGHT * contact_switches_this_step
+        anchor_reset_penalty_unscaled = _ANCHOR_RESET_PENALTY_WEIGHT * new_anchor_resets
+        anchor_deactivation_penalty_unscaled = _ANCHOR_DEACTIVATION_PENALTY_WEIGHT * new_anchor_deactivations
+
+        foot_slip_penalty = stance_quality_scale * foot_slip_penalty_unscaled
+        foot_anchor_penalty = stance_quality_scale * foot_anchor_penalty_unscaled
+        base_drift_penalty = stance_quality_scale * base_drift_penalty_unscaled
+        contact_switch_penalty = stance_quality_scale * contact_switch_penalty_unscaled
+        anchor_reset_penalty = stance_quality_scale * anchor_reset_penalty_unscaled
+        anchor_deactivation_penalty = stance_quality_scale * anchor_deactivation_penalty_unscaled
 
         terms = {
+            "stance_quality_scale": float(stance_quality_scale),
+            "foot_slip_step": float(foot_slip_step),
             "foot_slip_error": float(foot_slip_error),
             "foot_slip_penalty": float(foot_slip_penalty),
+            "foot_slip_penalty_unscaled": float(foot_slip_penalty_unscaled),
             "base_drift": float(base_drift),
             "base_drift_error": float(base_drift_error),
+            "base_drift_normalized_error": float(base_drift_normalized_error),
             "base_drift_penalty": float(base_drift_penalty),
+            "base_drift_penalty_unscaled": float(base_drift_penalty_unscaled),
             "foot_anchor_error": float(foot_anchor_error),
+            "foot_anchor_normalized_error": float(foot_anchor_error),
             "foot_anchor_penalty": float(foot_anchor_penalty),
+            "foot_anchor_penalty_unscaled": float(foot_anchor_penalty_unscaled),
             "foot_anchor_active_count": float(np.sum(self._foot_anchor_active)),
             "foot_anchor_max_displacement": float(foot_anchor_max_displacement),
+            "contact_switches_this_step": float(contact_switches_this_step),
+            "contact_switch_penalty": float(contact_switch_penalty),
+            "contact_switch_penalty_unscaled": float(contact_switch_penalty_unscaled),
+            "anchor_resets_this_step": float(new_anchor_resets),
+            "anchor_deactivations_this_step": float(new_anchor_deactivations),
+            "anchor_reset_penalty": float(anchor_reset_penalty),
+            "anchor_deactivation_penalty": float(anchor_deactivation_penalty),
         }
         terms.update(self._anchor_diagnostic_terms(foot_loads, foot_displacements, foot_errors, base_xz))
-        penalty = foot_slip_penalty + foot_anchor_penalty + base_drift_penalty
+        self._prev_foot_xz = foot_xz_positions.copy()
+        penalty = (
+            foot_slip_penalty
+            + foot_anchor_penalty
+            + base_drift_penalty
+            + contact_switch_penalty
+            + anchor_reset_penalty
+            + anchor_deactivation_penalty
+        )
         return -float(penalty), terms
 
     def _motion_reward_terms(
         self,
         obs: np.ndarray,
-        action: np.ndarray,
-        action_delta: np.ndarray,
+        raw_action: np.ndarray,
+        executed_action: np.ndarray,
+        executed_action_delta: np.ndarray,
+        raw_action_delta: np.ndarray,
     ) -> tuple[float, dict]:
-        trunk_lin_vel = obs[7:10]
-        trunk_ang_vel = obs[10:13]
-        joint_vel = obs[25:37]
+        trunk_lin_vel = obs[5:8]
+        trunk_ang_vel = obs[8:11]
+        joint_vel = obs[23:35]
         joint_vel_penalty = _JOINT_VEL_PENALTY_WEIGHT * float(np.mean(joint_vel ** 2))
-        action_rate_penalty = _ACTION_RATE_PENALTY_WEIGHT * float(np.mean(action_delta ** 2))
-        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.mean(action ** 2))
+        action_rate_penalty = _ACTION_RATE_PENALTY_WEIGHT * float(np.mean(executed_action_delta ** 2))
+        raw_action_rate_penalty = _RAW_ACTION_RATE_PENALTY_WEIGHT * float(np.mean(raw_action_delta ** 2))
+        filter_lag = raw_action - executed_action
+        filter_lag_penalty = _FILTER_LAG_PENALTY_WEIGHT * float(np.mean(filter_lag ** 2))
+        control_penalty = _CONTROL_PENALTY_WEIGHT * float(np.mean(executed_action ** 2))
         ang_vel_penalty = _ANG_VEL_PENALTY_WEIGHT * float(np.mean(trunk_ang_vel ** 2))
         xz_vel = trunk_lin_vel[[0, 2]]
         xz_vel_penalty = _XZ_VEL_PENALTY_WEIGHT * float(np.mean(xz_vel ** 2))
@@ -734,11 +1069,15 @@ class Go1Env(gym.Env):
             "max_abs_joint_vel": float(np.max(np.abs(joint_vel))),
             "joint_vel_penalty": float(joint_vel_penalty),
             "action_rate_penalty": float(action_rate_penalty),
-            "mean_abs_action_delta": float(np.mean(np.abs(action_delta))),
-            "max_abs_action_delta": float(np.max(np.abs(action_delta))),
+            "raw_action_rate_penalty": float(raw_action_rate_penalty),
+            "filter_lag_penalty": float(filter_lag_penalty),
+            "mean_abs_action_delta": float(np.mean(np.abs(executed_action_delta))),
+            "max_abs_action_delta": float(np.max(np.abs(executed_action_delta))),
             "control_penalty": float(control_penalty),
-            "mean_abs_action": float(np.mean(np.abs(action))),
-            "max_abs_action": float(np.max(np.abs(action))),
+            "mean_abs_action": float(np.mean(np.abs(executed_action))),
+            "max_abs_action": float(np.max(np.abs(executed_action))),
+            "mean_filter_lag": float(np.mean(np.abs(filter_lag))),
+            "max_filter_lag": float(np.max(np.abs(filter_lag))),
             "ang_vel_penalty": float(ang_vel_penalty),
             "mean_abs_ang_vel": float(np.mean(np.abs(trunk_ang_vel))),
             "max_abs_ang_vel": float(np.max(np.abs(trunk_ang_vel))),
@@ -754,6 +1093,8 @@ class Go1Env(gym.Env):
         penalty = (
             joint_vel_penalty
             + action_rate_penalty
+            + raw_action_rate_penalty
+            + filter_lag_penalty
             + control_penalty
             + ang_vel_penalty
             + xz_vel_penalty
@@ -763,8 +1104,10 @@ class Go1Env(gym.Env):
     def _standing_reward(
         self,
         obs: np.ndarray,
-        action: np.ndarray,
-        action_delta: np.ndarray,
+        raw_action: np.ndarray,
+        executed_action: np.ndarray,
+        executed_action_delta: np.ndarray,
+        raw_action_delta: np.ndarray,
     ) -> tuple[float, dict]:
         """Standing reward: survive, stay upright, and keep four-foot support."""
         if not np.all(np.isfinite(obs)):
@@ -777,7 +1120,7 @@ class Go1Env(gym.Env):
             self._pose_reward_terms(obs),
             self._foot_contact_terms(),
             self._settled_standing_quality_terms(obs),
-            self._motion_reward_terms(obs, action, action_delta),
+            self._motion_reward_terms(obs, raw_action, executed_action, executed_action_delta, raw_action_delta),
         ):
             reward += delta
             terms.update(delta_terms)
@@ -786,7 +1129,7 @@ class Go1Env(gym.Env):
     def _termination_reason(self, obs: np.ndarray, reward_terms: dict) -> str | None:
         if not np.all(np.isfinite(obs)):
             return "invalid_obs"
-        if float(obs[1]) < _TERM_HEIGHT:
+        if float(reward_terms.get("base_relative_height", obs[0])) < _TERM_RELATIVE_HEIGHT:
             return "height"
         # Upright termination stays outside the reward so tipping is still a
         # failure while the reward baseline remains terrain-agnostic.
@@ -800,6 +1143,7 @@ class Go1Env(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self._sample_reset_noise()
         self._build_sim()
         self._prev_action = np.zeros(12, dtype=np.float32)
         self._prev_raw_action = np.zeros(12, dtype=np.float32)
@@ -814,8 +1158,11 @@ class Go1Env(gym.Env):
         self._standing_reference_captured = False
         self.step_count = 0
         obs = self._get_obs()
-        self._reset_base_xz = np.array([float(obs[0]), float(obs[2])], dtype=np.float32)
+        self._record_initial_reset_diagnostics()
+        base_world = self._base_world_pos()
+        self._reset_base_xz = np.array([base_world[0], base_world[2]], dtype=np.float32)
         self._base_anchor_xz = self._reset_base_xz.copy()
+        self._base_anchor_yaw = self._trunk_yaw()
         return obs, self._info()
 
     def step(self, action: np.ndarray):
@@ -846,10 +1193,30 @@ class Go1Env(gym.Env):
         if self._terrain is not None:
             self._terrain.Advance(_TIME_STEP)
 
+        self._prev_raw_action = raw_action.copy()
+        self._prev_action = executed_action.copy()
         obs = self._get_obs()
         truncated = self.step_count >= self.max_steps
-        reward, reward_terms = self._standing_reward(obs, executed_action, action_delta)
+        reward, reward_terms = self._standing_reward(obs, raw_action, executed_action, action_delta, raw_action_delta)
+        filter_lag = raw_action - executed_action
+        base_world = self._base_world_pos()
         reward_terms.update({
+            "base_world_x": float(base_world[0]),
+            "base_world_y": float(base_world[1]),
+            "base_world_z": float(base_world[2]),
+            "base_relative_height": self._base_relative_height(),
+            "ground_top_y": self._ground_top_y(),
+            "ground_height_offset": self.ground_height_offset,
+            "reset_noise_enabled": float(self._reset_noise_sample["enabled"]),
+            "reset_noise_base_height_offset": float(self._reset_noise_sample["base_height_offset"]),
+            "reset_noise_roll": float(self._reset_noise_sample["roll"]),
+            "reset_noise_pitch": float(self._reset_noise_sample["pitch"]),
+            "reset_noise_joint_pos_offset_rms": float(np.sqrt(np.mean(np.square(self._reset_noise_sample["joint_position_offsets"])))),
+            "reset_noise_joint_vel_offset_rms": float(np.sqrt(np.mean(np.square(self._reset_noise_sample["joint_velocity_offsets"])))),
+            "reset_noise_base_linear_velocity_norm": float(np.linalg.norm(self._reset_noise_sample["base_linear_velocity"])),
+            "reset_noise_base_angular_velocity_norm": float(np.linalg.norm(self._reset_noise_sample["base_angular_velocity"])),
+            "reset_noise_initial_min_foot_y": float(self._reset_noise_sample["initial_min_foot_y"]),
+            "reset_noise_initial_max_foot_load": float(self._reset_noise_sample["initial_max_foot_load"]),
             "action_filter_tau": 0.0 if self.action_filter_tau is None else float(self.action_filter_tau),
             "action_filter_alpha": 0.0 if self.action_filter_alpha is None else float(self.action_filter_alpha),
             "mean_abs_raw_action": float(np.mean(np.abs(raw_action))),
@@ -860,13 +1227,13 @@ class Go1Env(gym.Env):
             "max_abs_executed_action": float(np.max(np.abs(executed_action))),
             "mean_abs_executed_action_delta": float(np.mean(np.abs(action_delta))),
             "max_abs_executed_action_delta": float(np.max(np.abs(action_delta))),
+            "mean_filter_lag": float(np.mean(np.abs(filter_lag))),
+            "max_filter_lag": float(np.max(np.abs(filter_lag))),
         })
         termination_reason = self._termination_reason(obs, reward_terms)
         terminated = termination_reason is not None
         if terminated:
             reward -= 5.0
-        self._prev_raw_action = raw_action.copy()
-        self._prev_action = executed_action.copy()
 
         info = self._info()
         info["target_joint_angles"] = targets
@@ -914,6 +1281,13 @@ class Go1Env(gym.Env):
             "foot_friction": _FOOT_FRICTION,
             "effective_friction": material_info["effective_friction"],
             "friction_range": self.friction_range,
+            "spawn_x": float(self.spawn_xz[0]),
+            "spawn_z": float(self.spawn_xz[1]),
+            "ground_height_offset": self.ground_height_offset,
+            "ground_top_y": self._ground_top_y(),
+            "reset_noise_level": self.reset_noise_level,
+            "reset_noise_components": self.reset_noise_components,
+            "reset_noise": self._reset_noise_sample,
             "material_properties": material_info,
         }
 
