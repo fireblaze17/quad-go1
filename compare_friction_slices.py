@@ -13,7 +13,7 @@ from project_config import DEFAULT_ACTION_FILTER_TAU
 
 DEFAULT_MUS = (0.50, 0.60, 0.70, 0.80, 0.95, 1.10)
 RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
-RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "yaw", "base_height", "base_position", "base_velocity")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
+        "--no-action-filter",
+        action="store_true",
+        help="Disable action filtering in spawned diagnostics.",
+    )
+    parser.add_argument(
         "--mu",
         type=float,
         nargs="*",
@@ -47,7 +52,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("diagnostics"),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.no_action_filter:
+        args.action_filter_tau = None
+    return args
 
 
 def _run(command: list[str]) -> None:

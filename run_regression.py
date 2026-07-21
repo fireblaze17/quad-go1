@@ -15,7 +15,7 @@ from project_config import DEFAULT_ACTION_FILTER_TAU
 
 
 RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
-RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "yaw", "base_height", "base_position", "base_velocity")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -38,12 +38,20 @@ def parse_args() -> argparse.Namespace:
         help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
+        "--no-action-filter",
+        action="store_true",
+        help="Disable action filtering in spawned evaluation and diagnostics.",
+    )
+    parser.add_argument(
         "--diagnostics-root",
         type=Path,
         default=Path("diagnostics"),
         help="Root folder for regression outputs.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.no_action_filter:
+        args.action_filter_tau = None
+    return args
 
 
 def _run_command(command: list[str], output_path: Path) -> str:

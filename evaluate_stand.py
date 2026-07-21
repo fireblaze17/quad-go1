@@ -11,7 +11,7 @@ from project_config import CURRENT_BASELINE_MODEL, DEFAULT_ACTION_FILTER_TAU, SB
 
 
 RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
-RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "yaw", "base_height", "base_position", "base_velocity")
 
 
 def parse_args():
@@ -37,7 +37,15 @@ def parse_args():
         default=DEFAULT_ACTION_FILTER_TAU,
         help="Environment action low-pass filter time constant in seconds.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--no-action-filter",
+        action="store_true",
+        help="Disable action filtering even if the evaluation default would enable it.",
+    )
+    args = parser.parse_args()
+    if args.no_action_filter:
+        args.action_filter_tau = None
+    return args
 
 
 def main() -> None:

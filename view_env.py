@@ -1,15 +1,42 @@
 """Run the Chrono Go1 Gymnasium environment with the Irrlicht viewer."""
 
+import argparse
+
 import numpy as np
 
 from diagnostics import FOOT_BODY_NAMES, foot_bodies, foot_debug_stats, foot_xz_positions
 from go1_env import Go1Env
 
 
-TERRAIN = "flat"  # Use "scm" for deformable soil.
-ENABLE_MOTORS = True
-MAX_STEPS = 1000
-LOG_INTERVAL = 100
+RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "yaw", "base_height", "base_position", "base_velocity")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--terrain", choices=["flat", "scm"], default="flat")
+    parser.add_argument("--friction-min", type=float, default=0.8)
+    parser.add_argument("--friction-max", type=float, default=0.8)
+    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--spawn-x", type=float, default=0.0)
+    parser.add_argument("--spawn-z", type=float, default=0.0)
+    parser.add_argument("--ground-height-offset", type=float, default=0.0)
+    parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
+    parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
+    parser.add_argument("--action-filter-tau", type=float, default=None)
+    parser.add_argument("--disable-motors", action="store_true")
+    parser.add_argument("--log-interval", type=int, default=100)
+    parser.add_argument(
+        "--ignore-termination",
+        action="store_true",
+        help="Keep stepping after height/tip termination so a fall can be watched.",
+    )
+    parser.add_argument(
+        "--no-reset-on-end",
+        action="store_true",
+        help="Close the viewer instead of rebuilding the sim when an episode ends.",
+    )
+    return parser.parse_args()
 
 
 def print_step(
@@ -22,7 +49,7 @@ def print_step(
     terms = info.get("reward_terms", {})
     print(
         f"ep={episode:03d} step={step:04d} "
-        f"height={float(terms.get('trunk_y', 0.0)):.3f} "
+        f"h_rel={float(terms.get('base_relative_height', 0.0)):.3f} "
         f"upright={float(terms.get('upright_score', 0.0)):.3f} "
         f"axis=({float(terms.get('trunk_x_up', 0.0)):+.3f},"
         f"{float(terms.get('trunk_y_up', 0.0)):+.3f},"
@@ -46,20 +73,33 @@ def print_step(
 
 
 def main() -> None:
+    args = parse_args()
     env = Go1Env(
         render_mode="human",
-        max_steps=MAX_STEPS,
-        terrain=TERRAIN,
-        enable_motors=ENABLE_MOTORS,
+        max_steps=args.max_steps,
+        terrain=args.terrain,
+        enable_motors=not args.disable_motors,
+        friction_range=(args.friction_min, args.friction_max),
+        action_filter_tau=args.action_filter_tau,
+        reset_noise_level=args.reset_noise_level,
+        reset_noise_components=args.reset_noise_components,
+        spawn_x=args.spawn_x,
+        spawn_z=args.spawn_z,
+        ground_height_offset=args.ground_height_offset,
     )
-    env.reset()
+    _, reset_info = env.reset()
     tracked_feet = foot_bodies(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
 
     print(
-        f"viewing zero-action env terrain={TERRAIN} "
-        f"motors={'on' if ENABLE_MOTORS else 'off'}"
+        f"viewing zero-action env terrain={args.terrain} "
+        f"friction=({args.friction_min:.6g}, {args.friction_max:.6g}) "
+        f"motors={'off' if args.disable_motors else 'on'} "
+        f"reset_noise={args.reset_noise_level}/{args.reset_noise_components} "
+        f"spawn=({args.spawn_x:.2f}, {args.spawn_z:.2f}) "
+        f"ground_height_offset={args.ground_height_offset:.2f}"
     )
+    print(f"reset_noise_sample={reset_info['reset_noise']}")
     print(f"tracking feet={', '.join(FOOT_BODY_NAMES)}")
     step = 0
     episode = 1
@@ -69,17 +109,21 @@ def main() -> None:
             action = np.zeros(12, dtype=np.float32)
             _, _, terminated, truncated, info = env.step(action)
 
-            if step % LOG_INTERVAL == 0:
+            if args.log_interval > 0 and step % args.log_interval == 0:
                 foot_stats = foot_debug_stats(tracked_feet, reset_foot_xz)
                 print_step(episode, step, action, info, foot_stats)
 
-            if terminated or truncated:
+            ended = truncated or (terminated and not args.ignore_termination)
+            if ended:
                 print(
                     f"ep={episode:03d} ended "
                     f"reason={info.get('termination_reason') or 'truncated'} "
                     f"steps={step + 1}"
                 )
-                env.reset()
+                if args.no_reset_on_end:
+                    break
+                _, reset_info = env.reset()
+                print(f"reset_noise_sample={reset_info['reset_noise']}")
                 tracked_feet = foot_bodies(env)
                 reset_foot_xz = foot_xz_positions(tracked_feet)
                 step = 0

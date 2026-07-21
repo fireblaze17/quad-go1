@@ -9,8 +9,9 @@ ORIGINAL_STAND_MODEL = Path("runs/stand/final_model.zip")
 FIXED_BASELINE_DIR = Path("runs/stand_base_v2")
 FIXED_BASELINE_MODEL = FIXED_BASELINE_DIR / "final_model.zip"
 
-DEFAULT_CHECKPOINT_FREQ = 25_000
+DEFAULT_CHECKPOINT_FREQ = 50_000
 DEFAULT_ACTION_FILTER_TAU = 0.05
+DEFAULT_MAX_STEPS = 1000
 
 FRICTION_A_DIR = Path("runs/stand_friction_a_07_09")
 FRICTION_AB_DIR = Path("runs/stand_friction_ab_065_095")
@@ -26,12 +27,11 @@ FRICTION_050_120_MODEL = FRICTION_050_120_DIR / "checkpoints" / "stand_policy_10
 LAST_ACCEPTED_V2_MODEL = FRICTION_050_120_MODEL
 V3_RELATIVE_FIXED08_ATTEMPT_MODEL = V3_RELATIVE_FIXED08_DIR / "checkpoints" / "stand_policy_25000_steps.zip"
 V3P1_RELATIVE_FIXED08_MODEL = V3P1_RELATIVE_FIXED08_DIR / "checkpoints" / "stand_policy_5000_steps.zip"
-V3P1_FRICTION_ROBUST_MODEL = V3P1_RELATIVE_FIXED08_MODEL
+V3P1_CLEAN_STANDING_MODEL = V3P1_RELATIVE_FIXED08_MODEL
 
-# Active code now uses the v3.1 65D relative-state observation. This checkpoint
-# is accepted for fixed standing, coordinate invariance, and effective friction
-# 0.5-1.2. V2 remains the last accepted reset-noise robust result, but its
-# checkpoints are shape-incompatible with this worktree.
-CURRENT_BASELINE_MODEL = V3P1_FRICTION_ROBUST_MODEL
+# Active code uses the v3.1 65D relative-state observation with Chrono position
+# motors. This checkpoint is the active clean-standing baseline. V2 checkpoints
+# remain historical for the pre-v3 lineage and are shape-incompatible here.
+CURRENT_BASELINE_MODEL = V3P1_CLEAN_STANDING_MODEL
 
 DEFAULT_VIEWER_FRICTION_RANGE = (0.8, 0.8)

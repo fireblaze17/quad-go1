@@ -29,7 +29,16 @@ _SLIP_THRESHOLD = 0.05
 _ACTION_BIAS_THRESHOLD = 0.12
 _JOINT_BIAS_THRESHOLD = 0.005
 RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
-RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+RESET_NOISE_COMPONENTS = (
+    "combined",
+    "joint_pos",
+    "joint_vel",
+    "roll_pitch",
+    "yaw",
+    "base_height",
+    "base_position",
+    "base_velocity",
+)
 
 
 def parse_args():
@@ -95,7 +104,14 @@ def parse_args():
         default=DEFAULT_ACTION_FILTER_TAU,
         help="Eval-only action low-pass filter time constant in seconds.",
     )
+    parser.add_argument(
+        "--no-action-filter",
+        action="store_true",
+        help="Disable action filtering even if the script default would enable it.",
+    )
     args = parser.parse_args()
+    if args.no_action_filter:
+        args.action_filter_tau = None
     if args.freeze_after_steps is not None and args.freeze_after_steps <= 0:
         parser.error("--freeze-after-steps must be positive when provided")
     if args.freeze_average_window <= 0:
@@ -576,9 +592,22 @@ def _timeline_row(
         "tilt_error": terms.get("tilt_error", 0.0),
         "tilt_direction": _tilt_direction(terms),
         "reset_noise_enabled": terms.get("reset_noise_enabled", 0.0),
+        "reset_noise_base_position_offset_x": terms.get("reset_noise_base_position_offset_x", 0.0),
+        "reset_noise_base_position_offset_z": terms.get("reset_noise_base_position_offset_z", 0.0),
         "reset_noise_base_height_offset": terms.get("reset_noise_base_height_offset", 0.0),
         "reset_noise_roll": terms.get("reset_noise_roll", 0.0),
         "reset_noise_pitch": terms.get("reset_noise_pitch", 0.0),
+        "reset_noise_yaw": terms.get("reset_noise_yaw", 0.0),
+        "reset_noise_base_linear_velocity_x": terms.get("reset_noise_base_linear_velocity_x", 0.0),
+        "reset_noise_base_linear_velocity_y": terms.get("reset_noise_base_linear_velocity_y", 0.0),
+        "reset_noise_base_linear_velocity_z": terms.get("reset_noise_base_linear_velocity_z", 0.0),
+        "reset_noise_base_angular_velocity_x": terms.get("reset_noise_base_angular_velocity_x", 0.0),
+        "reset_noise_base_angular_velocity_y": terms.get("reset_noise_base_angular_velocity_y", 0.0),
+        "reset_noise_base_angular_velocity_z": terms.get("reset_noise_base_angular_velocity_z", 0.0),
+        "reset_noise_contact_safety_clearance": terms.get("reset_noise_contact_safety_clearance", 0.0),
+        "reset_noise_contact_safety_min_clearance_before_lift": terms.get("reset_noise_contact_safety_min_clearance_before_lift", 0.0),
+        "reset_noise_contact_safety_lift": terms.get("reset_noise_contact_safety_lift", 0.0),
+        "reset_noise_contact_safety_min_clearance_after_lift": terms.get("reset_noise_contact_safety_min_clearance_after_lift", 0.0),
         "reset_noise_joint_pos_offset_rms": terms.get("reset_noise_joint_pos_offset_rms", 0.0),
         "reset_noise_joint_vel_offset_rms": terms.get("reset_noise_joint_vel_offset_rms", 0.0),
         "reset_noise_base_linear_velocity_norm": terms.get("reset_noise_base_linear_velocity_norm", 0.0),

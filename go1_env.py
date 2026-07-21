@@ -32,7 +32,12 @@ from gymnasium import spaces
 
 _URDF = Path(__file__).parent / "models/go1/go1_chrono.urdf"
 
-_TIME_STEP = 0.002
+_PHYSICS_TIME_STEP = 5e-3
+_CONTROL_FREQUENCY = 50.0
+_TIME_STEP = 1.0 / _CONTROL_FREQUENCY
+_PHYSICS_SUBSTEPS = int(round(_TIME_STEP / _PHYSICS_TIME_STEP))
+if not np.isclose(_PHYSICS_SUBSTEPS * _PHYSICS_TIME_STEP, _TIME_STEP):
+    raise ValueError("Control timestep must be an integer multiple of the physics timestep.")
 _TERRAIN_LENGTH = 6.0
 _TERRAIN_WIDTH = 4.0
 _TERRAIN_DELTA = 0.04
@@ -89,60 +94,77 @@ _STANCE_QUALITY_RAMP_STEPS = 100
 _MIN_FOOT_LOAD = 20.0
 _ANCHOR_LOAD_THRESHOLDS = (20.0, 15.0, 8.0, 5.0)
 _RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
+_RESET_FOOT_CLEARANCE = 0.005
 _RESET_NOISE_COMPONENTS = (
     "combined",
     "joint_pos",
     "joint_vel",
     "roll_pitch",
+    "yaw",
     "base_height",
+    "base_position",
     "base_velocity",
 )
 _RESET_NOISE_SPECS = {
     "clean": {
+        "base_position_xz": 0.0,
         "base_height": 0.0,
-        "roll_pitch_deg": 0.0,
-        "joint_pos": 0.0,
+        "roll_pitch": 0.0,
+        "yaw": 0.0,
+        "joint_pos_by_type": (0.0, 0.0, 0.0),
         "joint_vel": 0.0,
         "base_linear_xz": 0.0,
         "base_linear_y": 0.0,
         "base_angular_xz": 0.0,
+        "base_angular_y": 0.0,
     },
     "rn1": {
-        "base_height": 0.005,
-        "roll_pitch_deg": 1.0,
-        "joint_pos": 0.02,
-        "joint_vel": 0.05,
-        "base_linear_xz": 0.02,
-        "base_linear_y": 0.005,
-        "base_angular_xz": 0.05,
+        "base_position_xz": 0.03,
+        "base_height": 0.015,
+        "roll_pitch": 0.05,
+        "yaw": math.pi,
+        "joint_pos_by_type": (0.04, 0.08, 0.10),
+        "joint_vel": 0.20,
+        "base_linear_xz": 0.10,
+        "base_linear_y": 0.03,
+        "base_angular_xz": 0.15,
+        "base_angular_y": 0.20,
     },
     "rn2": {
-        "base_height": 0.010,
-        "roll_pitch_deg": 2.0,
-        "joint_pos": 0.04,
-        "joint_vel": 0.15,
-        "base_linear_xz": 0.05,
-        "base_linear_y": 0.02,
-        "base_angular_xz": 0.10,
+        "base_position_xz": 0.10,
+        "base_height": 0.030,
+        "roll_pitch": 0.12,
+        "yaw": math.pi,
+        "joint_pos_by_type": (0.10, 0.12, 0.15),
+        "joint_vel": 0.50,
+        "base_linear_xz": 0.25,
+        "base_linear_y": 0.05,
+        "base_angular_xz": 0.40,
+        "base_angular_y": 0.50,
     },
     "rn3": {
-        "base_height": 0.015,
-        "roll_pitch_deg": 4.0,
-        "joint_pos": 0.08,
-        "joint_vel": 0.30,
-        "base_linear_xz": 0.10,
+        "base_position_xz": 0.10,
+        "base_height": 0.030,
+        "roll_pitch": 0.12,
+        "yaw": math.pi,
+        "joint_pos_by_type": (0.10, 0.12, 0.15),
+        "joint_vel": 0.50,
+        "base_linear_xz": 0.25,
         "base_linear_y": 0.05,
-        "base_angular_xz": 0.20,
+        "base_angular_xz": 0.40,
+        "base_angular_y": 0.50,
     },
 }
 
 # Zero action holds this home control pose.
 _HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
 _ACTION_SCALE = 0.20
+_ACTUATOR_MODEL = "position_motor"
 
 # Joint limits from go1_chrono.urdf, in _JOINT_NAMES order.
 _JOINT_LOW = np.tile([-0.863, -0.686, -2.818], 4).astype(np.float32)
 _JOINT_HIGH = np.tile([0.863, 4.501, -0.888], 4).astype(np.float32)
+_JOINT_VELOCITY_LIMIT = np.tile([30.1, 30.1, 20.06], 4).astype(np.float32)
 
 # Joint order is shared by actions, observations, limits, and home targets.
 # The axis/sign arrays convert Chrono motor-frame rotation vectors back to
@@ -180,10 +202,17 @@ def standing_env_metadata() -> dict:
     """Return the public training metadata needed to reproduce standing runs."""
     return {
         "time_step": _TIME_STEP,
+        "control_time_step": _TIME_STEP,
+        "control_frequency": _CONTROL_FREQUENCY,
+        "physics_time_step": _PHYSICS_TIME_STEP,
+        "physics_frequency": 1.0 / _PHYSICS_TIME_STEP,
+        "physics_substeps": _PHYSICS_SUBSTEPS,
         "spawn_height": _SPAWN_HEIGHT,
         "termination_relative_height": _TERM_RELATIVE_HEIGHT,
         "home_joint_angles": _HOME_JOINT_ANGLES.tolist(),
         "action_scale": _ACTION_SCALE,
+        "actuator_model": _ACTUATOR_MODEL,
+        "joint_velocity_limits": _JOINT_VELOCITY_LIMIT.tolist(),
         "collision_bodies": list(_ROBOT_COLLISION_BODIES),
         "reward_weights": {
             "alive_bonus": _ALIVE_BONUS,
@@ -225,8 +254,8 @@ def standing_env_metadata() -> dict:
         "reset_noise_levels": _RESET_NOISE_SPECS,
         "reset_noise_components": list(_RESET_NOISE_COMPONENTS),
         "reset_noise_notes": {
-            "base_xz_translation": "disabled for standing reset-noise training",
-            "yaw": "disabled for standing reset-noise training",
+            "base_xz_translation": "enabled for RN1/RN2 as a small flat-ground spawn offset",
+            "yaw": "enabled for RN1/RN2 as full yaw about Chrono world Y/gravity",
             "joint_velocity": "implemented as small child-link angular velocity perturbations in Chrono",
         },
         "solver": {
@@ -355,6 +384,9 @@ class Go1Env(gym.Env):
         self._trunk = None
         self._motors = []
         self._motor_funcs = []
+        self._last_motor_targets = self.home_joint_angles.copy()
+        self._last_joint_pos = self.home_joint_angles.copy()
+        self._last_joint_vel = np.zeros(12, dtype=np.float32)
         self._joint_body_pairs = []
         self._vis = None
         self._prev_action = np.zeros(12, dtype=np.float32)
@@ -404,22 +436,23 @@ class Go1Env(gym.Env):
             self.ground_friction = self._sample_ground_friction()
             self._add_flat_ground(system)
 
-        parser = self._create_robot_parser()
+        parser = self._create_robot_parser(
+            parsers.ChParserURDF.ActuationType_POSITION
+            if self.enable_motors
+            else None
+        )
         parser.PopulateSystem(system)
         self._configure_imported_bodies(system, parser)
         self._cache_robot_handles(system, terrain, parser)
 
-        # Zero-overhead home-pose init: fix the trunk so it cannot drift, then
-        # run Chrono's kinematic assembly solver (pure constraint satisfaction,
-        # no forces, no time integration). This drives every position-motor
-        # constraint to its target (home angle) in one call, placing all leg
-        # bodies in the correct standing pose before the first DoStepDynamics().
-        # AssemblyAnalysis.POSITION = 1.
-        self._trunk.SetFixed(True)
-        system.DoAssembly(1)
-        self._trunk.SetFixed(False)
+        if self.enable_motors:
+            self._set_position_motor_targets(self._reset_joint_targets)
+            self._trunk.SetFixed(True)
+            system.DoAssembly(1)
+            self._trunk.SetFixed(False)
+            self._apply_reset_contact_safety_lift()
         self._apply_reset_velocity_noise()
-        self._restore_home_motor_targets()
+        self._sync_joint_state_cache(reset_velocity=True)
         self._prev_foot_xz = self._foot_xz_positions()
         self._reward_contact_active = self._foot_loads() >= _MIN_FOOT_LOAD
 
@@ -432,6 +465,9 @@ class Go1Env(gym.Env):
             "enabled": False,
             "level": "clean",
             "components": "combined",
+            "base_position_offset_x": 0.0,
+            "base_position_offset_z": 0.0,
+            "base_position_offset": [0.0, 0.0],
             "base_height_offset": 0.0,
             "roll": 0.0,
             "pitch": 0.0,
@@ -440,6 +476,10 @@ class Go1Env(gym.Env):
             "joint_velocity_offsets": zeros12.copy(),
             "base_linear_velocity": [0.0, 0.0, 0.0],
             "base_angular_velocity": [0.0, 0.0, 0.0],
+            "contact_safety_clearance": _RESET_FOOT_CLEARANCE,
+            "contact_safety_min_clearance_before_lift": 0.0,
+            "contact_safety_lift": 0.0,
+            "contact_safety_min_clearance_after_lift": 0.0,
             "initial_foot_y": {name.split("_")[0]: 0.0 for name in _FOOT_BODY_NAMES},
             "initial_min_foot_y": 0.0,
             "initial_max_foot_y": 0.0,
@@ -450,6 +490,11 @@ class Go1Env(gym.Env):
     def _component_enabled(self, component: str) -> bool:
         return self.reset_noise_components in ("combined", component)
 
+    def _sample_reset_uniform(self, limit: float, size=None):
+        if limit <= 0.0:
+            return np.zeros(size, dtype=np.float32) if size is not None else 0.0
+        return self.np_random.uniform(-limit, limit, size=size)
+
     def _sample_reset_noise(self) -> None:
         spec = _RESET_NOISE_SPECS[self.reset_noise_level]
         sample = self._zero_reset_noise_sample()
@@ -457,16 +502,48 @@ class Go1Env(gym.Env):
         sample["level"] = self.reset_noise_level
         sample["components"] = self.reset_noise_components
 
+        if self._component_enabled("base_position"):
+            limit = spec["base_position_xz"]
+            if self.reset_noise_level == "rn3":
+                sample["base_position_offset_x"] = float(limit)
+                sample["base_position_offset_z"] = float(limit)
+            else:
+                sample["base_position_offset_x"] = float(self._sample_reset_uniform(limit))
+                sample["base_position_offset_z"] = float(self._sample_reset_uniform(limit))
+            sample["base_position_offset"] = [
+                sample["base_position_offset_x"],
+                sample["base_position_offset_z"],
+            ]
         if self._component_enabled("base_height"):
-            sample["base_height_offset"] = float(self.np_random.uniform(-spec["base_height"], spec["base_height"]))
+            if self.reset_noise_level == "rn3":
+                sample["base_height_offset"] = float(spec["base_height"])
+            else:
+                sample["base_height_offset"] = float(self._sample_reset_uniform(spec["base_height"]))
         if self._component_enabled("roll_pitch"):
-            limit = math.radians(spec["roll_pitch_deg"])
-            sample["roll"] = float(self.np_random.uniform(-limit, limit))
-            sample["pitch"] = float(self.np_random.uniform(-limit, limit))
+            limit = spec["roll_pitch"]
+            if self.reset_noise_level == "rn3":
+                sample["roll"] = float(limit)
+                sample["pitch"] = float(limit)
+            else:
+                sample["roll"] = float(self._sample_reset_uniform(limit))
+                sample["pitch"] = float(self._sample_reset_uniform(limit))
+        if self._component_enabled("yaw"):
+            if self.reset_noise_level == "rn3":
+                sample["yaw"] = float(spec["yaw"])
+            else:
+                sample["yaw"] = float(self._sample_reset_uniform(spec["yaw"]))
         if self._component_enabled("joint_pos"):
-            limit = spec["joint_pos"]
-            offsets = self.np_random.uniform(-limit, limit, size=12).astype(np.float32)
-            targets = np.clip(self.home_joint_angles + offsets, _JOINT_LOW, _JOINT_HIGH)
+            hip, thigh, calf = spec["joint_pos_by_type"]
+            per_joint_limits = np.tile([hip, thigh, calf], 4).astype(np.float32)
+            if self.reset_noise_level == "rn3":
+                offsets = per_joint_limits.copy()
+            else:
+                offsets = self.np_random.uniform(
+                    -per_joint_limits,
+                    per_joint_limits,
+                ).astype(np.float32)
+            targets = self.home_joint_angles + offsets
+            targets = np.clip(targets, _JOINT_LOW, _JOINT_HIGH)
             offsets = targets - self.home_joint_angles
             sample["joint_position_offsets"] = offsets.astype(float).tolist()
             self._reset_joint_targets = targets.astype(np.float32)
@@ -474,23 +551,31 @@ class Go1Env(gym.Env):
             self._reset_joint_targets = self.home_joint_angles.copy()
         if self._component_enabled("joint_vel"):
             limit = spec["joint_vel"]
-            sample["joint_velocity_offsets"] = (
-                self.np_random.uniform(-limit, limit, size=12).astype(float).tolist()
-            )
+            if self.reset_noise_level == "rn3":
+                sample["joint_velocity_offsets"] = [float(limit)] * 12
+            else:
+                sample["joint_velocity_offsets"] = (
+                    self._sample_reset_uniform(limit, size=12).astype(float).tolist()
+                )
         if self._component_enabled("base_velocity"):
             xz = spec["base_linear_xz"]
             y = spec["base_linear_y"]
             angular = spec["base_angular_xz"]
-            sample["base_linear_velocity"] = [
-                float(self.np_random.uniform(-xz, xz)),
-                float(self.np_random.uniform(-y, y)),
-                float(self.np_random.uniform(-xz, xz)),
-            ]
-            sample["base_angular_velocity"] = [
-                float(self.np_random.uniform(-angular, angular)),
-                0.0,
-                float(self.np_random.uniform(-angular, angular)),
-            ]
+            angular_y = spec["base_angular_y"]
+            if self.reset_noise_level == "rn3":
+                sample["base_linear_velocity"] = [float(xz), float(y), float(xz)]
+                sample["base_angular_velocity"] = [float(angular), float(angular_y), float(angular)]
+            else:
+                sample["base_linear_velocity"] = [
+                    float(self._sample_reset_uniform(xz)),
+                    float(self._sample_reset_uniform(y)),
+                    float(self._sample_reset_uniform(xz)),
+                ]
+                sample["base_angular_velocity"] = [
+                    float(self._sample_reset_uniform(angular)),
+                    float(self._sample_reset_uniform(angular_y)),
+                    float(self._sample_reset_uniform(angular)),
+                ]
         self._reset_noise_sample = sample
 
     def _sample_ground_friction(self) -> float:
@@ -567,24 +652,28 @@ class Go1Env(gym.Env):
             dtype=np.float32,
         )
 
-    def _create_robot_parser(self):
+    def _create_robot_parser(self, actuation_type=None):
         parser = parsers.ChParserURDF(str(_URDF))
         parser.EnableCollisionVisualization()
         reset_roll = float(self._reset_noise_sample["roll"])
         reset_pitch = float(self._reset_noise_sample["pitch"])
+        reset_yaw = float(self._reset_noise_sample["yaw"])
         reset_height = (
             self._ground_top_y()
             + _SPAWN_HEIGHT
             + float(self._reset_noise_sample["base_height_offset"])
         )
         root_rot = (
-            chrono.QuatFromAngleX(reset_roll)
+            chrono.QuatFromAngleY(reset_yaw)
+            * chrono.QuatFromAngleX(reset_roll)
             * chrono.QuatFromAngleZ(reset_pitch)
             * chrono.QuatFromAngleX(-math.pi / 2)
         )
+        reset_x = float(self.spawn_xz[0]) + float(self._reset_noise_sample["base_position_offset_x"])
+        reset_z = float(self.spawn_xz[1]) + float(self._reset_noise_sample["base_position_offset_z"])
         parser.SetRootInitPose(
             chrono.ChFramed(
-                chrono.ChVector3d(float(self.spawn_xz[0]), reset_height, float(self.spawn_xz[1])),
+                chrono.ChVector3d(reset_x, reset_height, reset_z),
                 root_rot,
             )
         )
@@ -592,10 +681,8 @@ class Go1Env(gym.Env):
             parsers.ChParserURDF.MeshCollisionType_TRIANGLE_MESH
         )
 
-        if self.enable_motors:
-            parser.SetAllJointsActuationType(
-                parsers.ChParserURDF.ActuationType_POSITION
-            )
+        if self.enable_motors and actuation_type is not None:
+            parser.SetAllJointsActuationType(actuation_type)
 
         parser.SetDefaultContactMaterial(_contact_material(mu=0.6))
         foot_mat = _contact_material(mu=0.8)
@@ -635,13 +722,9 @@ class Go1Env(gym.Env):
             if self.enable_motors else []
         )
 
-        # Pre-allocate one constant target function per position motor so we can
-        # update desired joint angles in-place each step.
-        # Initialise to home angles so joints are at the correct pose from step 0
-        # — no ramp needed, matching SBEL's Go2 actuate() pattern.
         self._motor_funcs = []
-        for i, motor in enumerate(self._motors):
-            function = chrono.ChFunctionConst(float(self._reset_joint_targets[i]))
+        for motor in self._motors:
+            function = chrono.ChFunctionConst(0.0)
             motor.SetMotorFunction(function)
             self._motor_funcs.append(function)
 
@@ -653,9 +736,48 @@ class Go1Env(gym.Env):
             if self.enable_motors else []
         )
 
-    def _restore_home_motor_targets(self) -> None:
-        for function, target in zip(self._motor_funcs, self.home_joint_angles):
-            function.SetConstant(float(target))
+    def _read_joint_angles(self) -> np.ndarray:
+        if not self._motors:
+            return np.zeros(12, dtype=np.float32)
+        return np.array(
+            [
+                self._joint_angle(motor, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
+                for i, motor in enumerate(self._motors)
+            ],
+            dtype=np.float32,
+        )
+
+    def _sync_joint_state_cache(self, reset_velocity: bool = False) -> None:
+        joint_pos = self._read_joint_angles()
+        if reset_velocity:
+            joint_vel = np.zeros(12, dtype=np.float32)
+        else:
+            joint_vel = ((joint_pos - self._last_joint_pos) / _TIME_STEP).astype(np.float32)
+        self._last_joint_pos = joint_pos
+        self._last_joint_vel = joint_vel
+
+    def _min_foot_clearance(self, feet=None) -> float:
+        feet = self._feet if feet is None else feet
+        if not feet:
+            return 0.0
+        ground_y = self._ground_top_y()
+        return float(min(float(foot.GetPos().y) - ground_y for foot in feet))
+
+    def _apply_reset_contact_safety_lift(self, system=None, feet=None) -> None:
+        if not self._reset_noise_sample["enabled"]:
+            return
+        system = self._system if system is None else system
+        before = self._min_foot_clearance(feet)
+        lift = max(0.0, _RESET_FOOT_CLEARANCE - before)
+        self._reset_noise_sample["contact_safety_min_clearance_before_lift"] = before
+        self._reset_noise_sample["contact_safety_lift"] = float(lift)
+        if lift > 0.0:
+            for body in system.GetBodies():
+                if body.IsFixed():
+                    continue
+                pos = body.GetPos()
+                body.SetPos(chrono.ChVector3d(float(pos.x), float(pos.y) + lift, float(pos.z)))
+        self._reset_noise_sample["contact_safety_min_clearance_after_lift"] = self._min_foot_clearance(feet)
 
     def _apply_reset_velocity_noise(self) -> None:
         lin_vel = self._reset_noise_sample["base_linear_velocity"]
@@ -674,6 +796,35 @@ class Go1Env(gym.Env):
             updated = [float(current.x), float(current.y), float(current.z)]
             updated[axis_idx] += velocity_component
             child_body.SetAngVelParent(chrono.ChVector3d(updated[0], updated[1], updated[2]))
+
+    def _set_position_motor_targets(self, targets: np.ndarray) -> np.ndarray:
+        targets = np.clip(targets, _JOINT_LOW, _JOINT_HIGH).astype(np.float32)
+        for function, target in zip(self._motor_funcs, targets):
+            function.SetConstant(float(target))
+        self._last_motor_targets = targets.copy()
+        return targets
+
+    def _apply_position_motor_targets(self, executed_action: np.ndarray) -> np.ndarray:
+        if not self.enable_motors:
+            self._last_motor_targets = np.zeros(12, dtype=np.float32)
+            return self._last_motor_targets.copy()
+
+        desired_targets = self.home_joint_angles + _ACTION_SCALE * executed_action
+        return self._set_position_motor_targets(desired_targets)
+
+    def _actuator_diagnostic_terms(self) -> dict[str, float | str]:
+        terms: dict[str, float | str] = {
+            "actuator_model": _ACTUATOR_MODEL,
+            "mean_abs_motor_target": float(np.mean(np.abs(self._last_motor_targets))),
+            "max_abs_motor_target": float(np.max(np.abs(self._last_motor_targets))),
+        }
+        for name, target in zip(
+            _JOINT_NAMES,
+            self._last_motor_targets,
+        ):
+            key = name.removesuffix("_joint")
+            terms[f"motor_target_{key}"] = float(target)
+        return terms
 
     def _record_initial_reset_diagnostics(self) -> None:
         foot_y = {}
@@ -735,27 +886,8 @@ class Go1Env(gym.Env):
         lin_vel = self._trunk.GetPosDt()
         ang_vel = self._trunk.GetAngVelParent()
 
-        if self._motors:
-            joint_pos = np.array(
-                [
-                    self._joint_angle(motor, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
-                    for i, motor in enumerate(self._motors)
-                ],
-                dtype=np.float32,
-            )
-        else:
-            joint_pos = np.zeros(12, dtype=np.float32)
-
-        if self._joint_body_pairs:
-            joint_vel = np.array(
-                [
-                    self._joint_vel(b1, b2, int(_JOINT_AXES[i]), float(_JOINT_AXIS_SIGN[i]))
-                    for i, (b1, b2) in enumerate(self._joint_body_pairs)
-                ],
-                dtype=np.float32,
-            )
-        else:
-            joint_vel = np.zeros(12, dtype=np.float32)
+        joint_pos = self._last_joint_pos if self._motors else np.zeros(12, dtype=np.float32)
+        joint_vel = self._last_joint_vel if self._motors else np.zeros(12, dtype=np.float32)
 
         if self._standing_reference_captured:
             base_world = self._base_world_pos()
@@ -1179,19 +1311,15 @@ class Go1Env(gym.Env):
             executed_action = executed_action.astype(np.float32)
         action_delta = executed_action - self._prev_action
         raw_action_delta = raw_action - self._prev_raw_action
-        if self.enable_motors:
-            desired_targets = self.home_joint_angles + _ACTION_SCALE * executed_action
-            targets = np.clip(desired_targets, _JOINT_LOW, _JOINT_HIGH)
-            for function, target in zip(self._motor_funcs, targets):
-                function.SetConstant(float(target))
-        else:
-            targets = np.zeros(12, dtype=np.float32)
+        targets = self._apply_position_motor_targets(executed_action)
 
-        if self._terrain is not None:
-            self._terrain.Synchronize(self._system.GetChTime())
-        self._system.DoStepDynamics(_TIME_STEP)
-        if self._terrain is not None:
-            self._terrain.Advance(_TIME_STEP)
+        for _ in range(_PHYSICS_SUBSTEPS):
+            if self._terrain is not None:
+                self._terrain.Synchronize(self._system.GetChTime())
+            self._system.DoStepDynamics(_PHYSICS_TIME_STEP)
+            if self._terrain is not None:
+                self._terrain.Advance(_PHYSICS_TIME_STEP)
+        self._sync_joint_state_cache(reset_velocity=False)
 
         self._prev_raw_action = raw_action.copy()
         self._prev_action = executed_action.copy()
@@ -1208,9 +1336,22 @@ class Go1Env(gym.Env):
             "ground_top_y": self._ground_top_y(),
             "ground_height_offset": self.ground_height_offset,
             "reset_noise_enabled": float(self._reset_noise_sample["enabled"]),
+            "reset_noise_base_position_offset_x": float(self._reset_noise_sample["base_position_offset_x"]),
+            "reset_noise_base_position_offset_z": float(self._reset_noise_sample["base_position_offset_z"]),
             "reset_noise_base_height_offset": float(self._reset_noise_sample["base_height_offset"]),
             "reset_noise_roll": float(self._reset_noise_sample["roll"]),
             "reset_noise_pitch": float(self._reset_noise_sample["pitch"]),
+            "reset_noise_yaw": float(self._reset_noise_sample["yaw"]),
+            "reset_noise_base_linear_velocity_x": float(self._reset_noise_sample["base_linear_velocity"][0]),
+            "reset_noise_base_linear_velocity_y": float(self._reset_noise_sample["base_linear_velocity"][1]),
+            "reset_noise_base_linear_velocity_z": float(self._reset_noise_sample["base_linear_velocity"][2]),
+            "reset_noise_base_angular_velocity_x": float(self._reset_noise_sample["base_angular_velocity"][0]),
+            "reset_noise_base_angular_velocity_y": float(self._reset_noise_sample["base_angular_velocity"][1]),
+            "reset_noise_base_angular_velocity_z": float(self._reset_noise_sample["base_angular_velocity"][2]),
+            "reset_noise_contact_safety_clearance": float(self._reset_noise_sample["contact_safety_clearance"]),
+            "reset_noise_contact_safety_min_clearance_before_lift": float(self._reset_noise_sample["contact_safety_min_clearance_before_lift"]),
+            "reset_noise_contact_safety_lift": float(self._reset_noise_sample["contact_safety_lift"]),
+            "reset_noise_contact_safety_min_clearance_after_lift": float(self._reset_noise_sample["contact_safety_min_clearance_after_lift"]),
             "reset_noise_joint_pos_offset_rms": float(np.sqrt(np.mean(np.square(self._reset_noise_sample["joint_position_offsets"])))),
             "reset_noise_joint_vel_offset_rms": float(np.sqrt(np.mean(np.square(self._reset_noise_sample["joint_velocity_offsets"])))),
             "reset_noise_base_linear_velocity_norm": float(np.linalg.norm(self._reset_noise_sample["base_linear_velocity"])),
@@ -1230,6 +1371,7 @@ class Go1Env(gym.Env):
             "mean_filter_lag": float(np.mean(np.abs(filter_lag))),
             "max_filter_lag": float(np.max(np.abs(filter_lag))),
         })
+        reward_terms.update(self._actuator_diagnostic_terms())
         termination_reason = self._termination_reason(obs, reward_terms)
         terminated = termination_reason is not None
         if terminated:

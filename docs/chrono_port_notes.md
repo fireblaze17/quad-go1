@@ -102,13 +102,13 @@ so `trunk` is the free body and converts mesh paths to local files.
 
 ## ADR-003: Position Control And Action Scale
 
-**Status:** Accepted
+**Status:** Superseded for runtime actuation by ADR-013
 
 **Context:** The first standing and walking policies need a stable actuation
 baseline. Torque control requires tuned PD gains and is harder to stabilize
 initially.
 
-**Decision:** Use `ActuationType_POSITION` for all joints. Zero action holds the
+**Decision:** Use `ActuationType_POSITION` for all joints. Zero action held the
 accepted Chrono standing pose. Actions are normalized offsets:
 
 ```python
@@ -121,8 +121,11 @@ contact and foot-support fixes.
 **Consequences:**
 
 - Easier to stabilize for the standing baseline.
-- Torque control remains a later option.
+- Chrono position motors remain the active runtime actuator for the current
+  V3.1 clean-standing baseline.
 - Walking may need the scale revisited if 0.20 limits step length.
+- The action-scale decision should be revisited when locomotion policies are
+  introduced.
 
 ---
 
@@ -402,6 +405,45 @@ foot_contact_penalty = 0.10 * mean(missing_foot_load**2)
 **Current note:** later reward cleanup raised the active foot-contact penalty to
 `2.00`. This ADR explains why contact-force support was introduced; see
 `go1_env.py` and `docs/reproduction_ladder.md` for current weights.
+
+---
+
+## ADR-013: Keep Position Motors As The Active Standing Actuator
+
+**Status:** Accepted for the active V3.1 branch
+
+**Context:** The current project phase is focused on learning Project Chrono and
+reinforcement-learning workflow around a standing controller. The accepted V3.1
+checkpoint was trained and diagnosed with Chrono position motors, and the active
+code path is kept aligned with that checkpoint.
+
+**Decision:** Use Chrono position motors as the runtime actuator in `Go1Env`.
+The policy outputs normalized home-centered joint-position offsets:
+
+```python
+target_q = clip(home_q + 0.20 * executed_action, joint_low, joint_high)
+motor_function.SetConstant(target_q)
+```
+
+The active home pose is:
+
+```text
+[0.0, 0.7, -1.4] per leg
+```
+
+**Evidence:** The V3.1 clean-standing diagnostics show the old standing failure
+modes, especially foot creep/contact shuffling/action jitter, are controlled in
+the clean baseline condition. The active claims stop there: RN1/RN2 reset noise,
+random pushes, friction randomization, and observation noise are still future
+work.
+
+**Consequences:**
+
+- The simulator and docs now match the V3.1 clean-standing checkpoint.
+- Reset-noise and push tests should be interpreted as tests of this
+  position-motor standing baseline.
+- Torque-actuator work is outside the active branch and is not part of the
+  current reproducibility path.
 
 ---
 

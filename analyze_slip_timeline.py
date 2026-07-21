@@ -12,7 +12,7 @@ from typing import Any
 
 
 _LEGS = ("FL", "FR", "RL", "RR")
-_TIME_STEP = 0.002
+_TIME_STEP = 0.02
 
 
 def parse_args() -> argparse.Namespace:

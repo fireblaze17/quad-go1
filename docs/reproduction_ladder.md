@@ -1,9 +1,24 @@
 # Reproduction Ladder
 
-This guide records the closest reproducible path from an untrained policy to
-the last accepted v2 standing controller, plus the active v3/v3.1 relative-state
-retraining branch. The run artifacts under `runs/` are gitignored, so exact
-reproduction requires preserving or sharing checkpoints out of band.
+This guide records the closest reproducible path from an untrained policy to the
+current v3.1 standing worktree. The run artifacts under `runs/` are gitignored,
+so exact reproduction requires preserving or sharing checkpoints out of band.
+
+Current source checkpoint for retiming comparisons:
+
+```text
+runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
+Go1Env(action_filter_tau=0.05)
+clean flat standing under the earlier one-action-per-physics-step timing
+no reset noise
+no pushes
+no absolute world XYZ policy input
+```
+
+The folder name contains `50k` because that was the planned run directory. The
+promoted checkpoint is `5000_steps.zip`. After switching the active environment
+to 50 Hz control / 200 Hz physics, this checkpoint is no longer automatically
+accepted and must be retrained or revalidated.
 
 Last accepted v2 endpoint:
 
@@ -15,9 +30,8 @@ effective flat friction mu = 0.5-1.2
 reset noise clean/RN-1/RN-2
 ```
 
-The v2 endpoint requires the pre-v3 37D observation code. It is
-shape-incompatible with the active 65D v3.1 worktree. See ADR-015 and ADR-016
-in `docs/experiments/fixed_friction_standing.md` for the relative-state branch.
+That v2 endpoint is valid for the pre-v3 code lineage. It is not loaded into
+v3.1 because the observation shape changed.
 
 ## Environment Setup
 
@@ -30,7 +44,7 @@ python -m py_compile go1_env.py train_stand.py evaluate_stand.py diagnose_policy
 
 The project uses WSL Ubuntu for PyChrono and WSLg for Irrlicht viewers.
 
-## Active V3.1 Reward
+## Active V3.1 Reward And Control
 
 The current active reward is:
 
@@ -52,6 +66,13 @@ reward =
 - foot-anchor penalty after the stance ramp
 - base-drift penalty after the stance ramp
 - contact-switch and anchor reset/deactivation penalties
+```
+
+The current runtime actuator is:
+
+```python
+target_q = clip(home_q + 0.20 * executed_action, joint_low, joint_high)
+motor_function.SetConstant(target_q)
 ```
 
 Current weights:
@@ -87,7 +108,7 @@ alpha = dt / (tau + dt)
 executed_action = previous_executed_action + alpha * (raw_action - previous_executed_action)
 ```
 
-Accepted baseline uses `tau=0.05`.
+The active V3.1 position-motor path keeps `tau=0.05`.
 
 ## Stage 1: Historical Standing V2 From Scratch
 
@@ -259,11 +280,15 @@ runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_poli
 Reason: the 10k checkpoint had the best worst-slice behavior. Later checkpoints
 were not automatically better and were treated as degraded for this selection.
 
-## Stage 6: Extend Effective Friction To 0.5-1.2
+## Stage 6: V2 Effective Friction 0.5-1.2
+
+This was accepted in the old v2 lineage. The result is kept as valid historical
+evidence for v2, while the active v3.1 branch must earn its own robustness
+claims because its observation and reward design changed.
 
 Chrono combines ground and foot material friction with `min(ground, foot)`.
 The previous `foot_friction=0.9` capped all higher ground values at effective
-`0.9`. The current code sets:
+`0.9`. The code was changed to:
 
 ```text
 _FOOT_FRICTION = 2.0
@@ -273,8 +298,8 @@ This is a cap-removal modeling choice, not a measured Unitree Go1 material.
 With foot friction `2.0`, ground friction slices through `1.2` are the
 effective friction values.
 
-No training was run for this stage. The randomized 10k checkpoint was evaluated
-directly:
+No training was run for this stage. The accepted v2 randomized 10k checkpoint
+was evaluated directly:
 
 ```text
 fixed slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
@@ -294,10 +319,12 @@ worst settled min foot load: 28.53 N
 max settled friction usage: 0.01833
 ```
 
-## Stage 7: Reset-State Noise Evaluation
+## Stage 7: V2 Reset-State Noise Evaluation
 
-Reset noise was added after friction robustness, using the existing randomized
-10k checkpoint. No PPO training was needed.
+This was also accepted in the old v2 lineage. It is not current V3.1 acceptance
+because v2 checkpoints are shape-incompatible with the active 65D observation,
+but it remains the last accepted broad robustness result before the v3/v3.1
+redesign. No PPO training was needed in that historical branch.
 
 Implemented reset levels:
 
@@ -342,8 +369,8 @@ max settled friction usage: 0.02035
 max non-foot load: 0.0
 ```
 
-Decision: accept the current checkpoint as reset-noise capable through RN-2
-without additional training.
+Decision: treat the accepted v2 checkpoint as reset-noise capable through RN-2
+in the pre-v3 code state without additional training.
 
 ## Stage 8: V3/V3.1 Relative-State Branch
 
@@ -420,20 +447,12 @@ settled min foot load: 26.95 N
 max non-foot load: 0.0
 ```
 
-Coordinate-invariance confirmation:
+## Stage 9: V3.1 Friction-Slice Interpretation Retracted
 
-```text
-spawn X/Z offsets through +/-0.5 m: all 30/30 nominal
-ground-height offsets through +/-0.20 m: all 30/30 nominal
-worst coordinate-screen drift: 0.000288 m
-worst coordinate-screen slip: 0.008764 m
-```
-
-## Stage 9: V3.1 Effective Friction 0.5-1.2
-
-V3.1 was evaluated first instead of immediately fine-tuned. The v2 project
-history showed that extra PPO training can degrade standing, so the gate was:
-train only if fixed friction slices fail.
+Fixed-friction slices were run after V3.1 clean standing, but they are no longer
+treated as a pass condition. This was a mistaken interpretation: without pushes
+or another source of meaningful horizontal shear, changing friction does not
+prove the standing policy can handle friction variation.
 
 Source checkpoint:
 
@@ -441,8 +460,8 @@ Source checkpoint:
 runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
 ```
 
-One reward implementation cleanup was made before evaluation: the remaining
-hard settled-quality early return was removed. The same ramped scales are used
+One reward implementation cleanup was made before those runs: the remaining hard
+settled-quality early return was removed. The same ramped scales are used
 instead:
 
 ```text
@@ -454,7 +473,7 @@ Reference-dependent anchor/base penalties remain zero before the step-100
 standing reference exists; direct loaded-foot slip and contact-switch terms
 ramp smoothly from the start.
 
-Screening command:
+Historical command that produced the now-retracted friction-slice numbers:
 
 ```bash
 for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
@@ -463,7 +482,7 @@ for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
 done
 ```
 
-Keeper command:
+Historical keeper command:
 
 ```bash
 for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
@@ -472,7 +491,7 @@ for MU in 0.5 0.6 0.8 0.9 1.0 1.1 1.2; do
 done
 ```
 
-Result:
+Recorded result, kept as historical context only:
 
 ```text
 100/100 nominal on every fixed slice
@@ -498,14 +517,69 @@ mu   episodes  nominal  drift_m   slip_m    switches  min_load_N  max_friction_u
 1.2  100       100/100   0.000215  0.007392  0         26.977      0.016936
 ```
 
-Decision: accept the v3.1 5k checkpoint as effective-friction robust through
-`mu=0.5-1.2` without additional PPO training. Next reproduction step is to
-repeat Stage 7 reset-noise screens with this v3.1 checkpoint before adding
-observation noise.
+Decision: do not accept this as friction robustness. The numbers show that the
+policy remains quiet while standing without disturbances; they do not prove
+friction randomization. Friction becomes meaningful after random pushes or other
+horizontal disturbances create real shear demands.
+
+## Stage 10: V3.1 Reset-Noise Definitions Updated
+
+RN1/RN2 were redefined for standing-only recovery. This stage updates the
+sampler and diagnostics only; it does not accept reset-noise robustness.
+
+```text
+RN1:
+  base X/Z position +/-0.03 m, base height +/-0.015 m
+  yaw [-pi, pi], roll/pitch +/-0.05 rad
+  base linear X/Z +/-0.10 m/s, base linear Y +/-0.03 m/s
+  base angular X/Z +/-0.15 rad/s, base angular Y/yaw +/-0.20 rad/s
+  joint pos hip/thigh/knee +/-0.04 / +/-0.08 / +/-0.10 rad
+  joint velocity +/-0.20 rad/s
+
+RN2:
+  base X/Z position +/-0.10 m, base height +/-0.030 m
+  yaw [-pi, pi], roll/pitch +/-0.12 rad
+  base linear X/Z +/-0.25 m/s, base linear Y +/-0.05 m/s
+  base angular X/Z +/-0.40 rad/s, base angular Y/yaw +/-0.50 rad/s
+  joint pos hip/thigh/knee +/-0.10 / +/-0.12 / +/-0.15 rad
+  joint velocity +/-0.50 rad/s
+```
+
+Smoke commands:
+
+```bash
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn1 --reset-noise-components combined --out diagnostics/v3p1_rn1_new_ranges_smoke3
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn2 --reset-noise-components combined --out diagnostics/v3p1_rn2_new_ranges_smoke3
+```
+
+Decision: RN1/RN2 ranges are now defined for V3.1 testing, but reset-noise
+robustness remains unaccepted until the actual screens pass.
+
+## Stage 11: Position-Motor V3.1 Is The Active Baseline
+
+The current V3.1 baseline uses Chrono position motors with the same
+home-centered action interface used when the clean-standing checkpoint was
+produced:
+
+```text
+home pose per leg = [0.0, 0.7, -1.4]
+action scale = 0.20
+action_filter_tau = 0.05
+physics timestep = 0.005 s
+control timestep = 0.020 s
+control frequency = 50 Hz
+physics substeps per policy action = 4
+episode length for active checks = 1000 RL steps = 20 s simulated time
+```
+
+Decision: V3.1 is currently accepted only for clean flat standing at the
+baseline fixed-friction condition. RN1/RN2 reset-noise recovery, random-push
+recovery, friction randomization, and observation noise remain future gates.
 
 ## Acceptance Pattern
 
-For future continuations, select checkpoints by worst fixed-slice behavior:
+For future continuations, select checkpoints by clean-standing and task-specific
+gate behavior:
 
 ```text
 survival_rate = 1.0
@@ -514,8 +588,7 @@ active-reference drift <= 0.03 m
 settled contact switches = 0 preferred
 settled min foot load near/above 20 N
 settled loaded-foot slip remains low
-friction_usage comfortably below 1.0
 viewer shows no sliding, chatter, or load collapse
 ```
 
-Do not promote a checkpoint just because average randomized reward improves.
+Do not promote a checkpoint just because it survives or average reward improves.

@@ -25,7 +25,7 @@ from project_config import (
 
 
 RESET_NOISE_LEVELS = ("clean", "rn1", "rn2", "rn3")
-RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "base_height", "base_velocity")
+RESET_NOISE_COMPONENTS = ("combined", "joint_pos", "joint_vel", "roll_pitch", "yaw", "base_height", "base_position", "base_velocity")
 
 
 def parse_args():
@@ -53,6 +53,11 @@ def parse_args():
         help="Environment action low-pass filter time constant in seconds.",
     )
     parser.add_argument(
+        "--no-action-filter",
+        action="store_true",
+        help="Disable action filtering even if the viewer default would enable it.",
+    )
+    parser.add_argument(
         "--log-interval",
         type=int,
         default=100,
@@ -68,7 +73,20 @@ def parse_args():
         action="store_true",
         help="Print the full per-foot contact/debug fields instead of the compact status line.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--ignore-termination",
+        action="store_true",
+        help="Keep stepping after height/tip termination so a fall can be watched.",
+    )
+    parser.add_argument(
+        "--no-reset-on-end",
+        action="store_true",
+        help="Close the viewer instead of rebuilding the sim when an episode ends.",
+    )
+    args = parser.parse_args()
+    if args.no_action_filter:
+        args.action_filter_tau = None
+    return args
 
 
 def print_joint_debug(obs) -> None:
@@ -204,7 +222,7 @@ def main() -> None:
         ground_height_offset=args.ground_height_offset,
     )
     model = PPO.load(args.policy, device=SB3_DEVICE)
-    obs, _ = env.reset()
+    obs, reset_info = env.reset()
     tracked_feet = foot_bodies(env)
     tracked_contacts = contact_body_groups(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
@@ -219,6 +237,7 @@ def main() -> None:
         f"action_filter_tau={args.action_filter_tau} "
         f"reset_noise={args.reset_noise_level}/{args.reset_noise_components}"
     )
+    print(f"reset_noise_sample={reset_info['reset_noise']}")
     step = 0
     episode = 1
 
@@ -251,13 +270,17 @@ def main() -> None:
                     )
                 interval_stats = new_interval_stats()
             step += 1
-            if terminated or truncated:
+            ended = truncated or (terminated and not args.ignore_termination)
+            if ended:
                 print(
                     f"ep={episode:03d} ended "
                     f"reason={info.get('termination_reason') or 'truncated'} "
                     f"steps={step}"
                 )
-                obs, _ = env.reset()
+                if args.no_reset_on_end:
+                    break
+                obs, reset_info = env.reset()
+                print(f"reset_noise_sample={reset_info['reset_noise']}")
                 tracked_feet = foot_bodies(env)
                 tracked_contacts = contact_body_groups(env)
                 reset_foot_xz = foot_xz_positions(tracked_feet)

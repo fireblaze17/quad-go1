@@ -5,14 +5,15 @@
 > with `action_filter_tau=0.05` and foot friction `2.0`, documented in
 > [fixed_friction_standing.md](fixed_friction_standing.md) and
 > [../reproduction_ladder.md](../reproduction_ladder.md). Use this file as
-> archived evidence, not as the current standing baseline.
+> archived v2 evidence, not as the current v3.1 standing baseline.
 
 ## Summary
 
-The old standing v2 checkpoint was the fixed-friction anchor for this archived
-curriculum. Historically, the flat friction curriculum continued training from
-that anchor through wider friction ranges. The active workflow now uses the
-newer filtered-control lineage instead.
+The old standing v2 checkpoint was the fixed-friction anchor for this
+curriculum. The flat friction curriculum continued training from that anchor
+through wider friction ranges. The active workflow now uses the newer v3.1
+relative-state lineage, so these results are historical v2 results rather than
+current v3.1 claims.
 
 ```text
 runs/stand_base_v2
@@ -106,12 +107,12 @@ What changed:
 
 Why it changed historically:
 
-- The fixed-friction standing v2 policy was accepted, but it only covered
-  friction `0.8`.
+- The fixed-friction standing v2 policy was used as the starting point, but it
+  only covered quiet `mu=0.8` standing.
 - At that time, the next robustness step was friction randomization before
-  changing terrain, reset noise, or reward terms. This is no longer the active
-  roadmap; the current filtered-control baseline has already accepted friction
-  and reset-noise gates.
+  changing terrain, reset noise, or reward terms. In the current v3.1 roadmap,
+  friction randomization is deferred until push/disturbance recovery creates
+  meaningful horizontal shear.
 - Native GPU use was not useful here because Chrono rollout simulation and MLP
   PPO updates are CPU-oriented; the warning coincided with lower training FPS.
 
@@ -151,7 +152,8 @@ Tradeoffs and consequences:
   fewer timesteps.
 - More PPO steps can cause policy drift, so acceptance still depends on
   evaluation, viewer behavior, and contact diagnostics, not reward alone.
-- The canonical friction A path now points at the accepted 300k checkpoint:
+- In this archived branch, the canonical friction A path pointed at the 300k
+  checkpoint:
   `runs/stand_friction_a_07_09/final_model.zip`.
 - Older comparison folders may exist locally, but downstream curriculum stages
   should load the canonical accepted path only.

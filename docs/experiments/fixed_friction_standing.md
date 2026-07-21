@@ -305,8 +305,10 @@ promotion. It also passed probes below the original training range, including
 `mu=0.5` and `0.55`, before the foot-friction cap was removed.
 
 **Consequences:** The accepted v2 friction-trained source is the 10k checkpoint,
-not the final 50k model. Future randomized runs should be selected by worst
-fixed slice, not by longest training or average randomized reward.
+not the final 50k model. Later checkpoints were not assumed better just because
+they had more PPO updates. This remains the accepted friction checkpoint for the
+v2/pre-relative-state lineage, while active v3.1 must be evaluated separately
+because its observation and reward design changed.
 
 ## ADR-013: Foot Friction 2.0 Removes The Effective-Friction Cap
 
@@ -327,12 +329,13 @@ friction.
 `std::min`. With foot friction `2.0`, each target slice in `0.5-1.2` is no
 longer capped by the foot material.
 
-**Consequences:** Evaluate the accepted v2 randomized 10k checkpoint across
+**Consequences:** Evaluate the v2 randomized 10k checkpoint across
 `0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2` before training. If any slice fails, train
 from the clean filtered fixed baseline with lower LR, not from the already
 randomized `0.6-0.9` checkpoint.
 
-The evaluation passed all slices, so the fallback training branch was not run:
+The v2 evaluation recorded nominal outcomes on all slices, so the fallback
+training branch was not run:
 
 ```text
 slices: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
@@ -346,7 +349,7 @@ worst settled min foot load: 28.53 N
 max settled friction usage: 0.01833
 ```
 
-The accepted v2 friction/reset robustness baseline is therefore:
+The accepted v2 checkpoint for this branch was:
 
 ```text
 runs/stand_friction_random_060_090_tau005_from_filtered2k/checkpoints/stand_policy_10000_steps.zip
@@ -354,19 +357,16 @@ action_filter_tau = 0.05
 _FOOT_FRICTION = 2.0
 ```
 
-## ADR-014: Reset-State Noise Comes After Friction Robustness
+## ADR-014: V2 Reset-State Noise Accepted Through RN-2
 
-**Status:** Accepted
+**Status:** Accepted for v2 lineage
 
-**Context:** The standing policy is now clean on flat terrain across effective
-friction `0.5-1.2`. The next project-scope robustness axis is reset-state
-noise, not pushes or actuator/model randomization. Reset noise tests whether
-the controller has a local recovery basin around the accepted standing pose.
+**Context:** In the v2 branch, reset-state noise was evaluated after the
+friction-range work. Reset noise tests whether the controller has a local
+recovery basin around the standing pose.
 
 External reset-noise guidance recommended component ablations and stronger
-episode counts than the friction gate, but its concern about mixing reset noise
-with friction randomization is not a blocker here because friction robustness is
-already accepted.
+episode counts than the friction gate.
 
 **Decision:** Add opt-in reset-noise levels to the environment and CLI tools,
 defaulting to clean behavior, then evaluate before training:
@@ -396,8 +396,8 @@ RN-3: height +/-0.015 m, roll/pitch +/-4 deg, joint pos +/-0.08 rad,
       base y vel +/-0.05 m/s, base angular x/z vel +/-0.20 rad/s
 ```
 
-RN-3 is implemented as an optional stretch test. It is not part of the accepted
-baseline and was not required before moving to observation noise.
+RN-3 was implemented as an optional stretch test. It was not part of the v2
+acceptance gate.
 
 **Evidence:** The implementation evidence:
 
@@ -437,11 +437,11 @@ diagnostics/keeper_reset_rn2_mu_0p5_confirm100/summary.json
 Component ablations at fixed `mu=0.8` also passed for joint position, joint
 velocity, roll/pitch, base height, and base velocity perturbations.
 
-**Consequences:** Accept the v2 randomized 10k checkpoint as reset-noise
-capable through RN-2. Do not run the planned 100k RN-2 fine-tune unless these
-keeper gates regress after future code changes. This was the last accepted v2
-robustness result; observation noise is deferred until v3.1 re-passes friction
-and reset-noise gates.
+**Consequences:** The v2 randomized 10k checkpoint is accepted as reset-noise
+capable through RN-2 in the pre-v3 code state. This does not transfer to active
+v3.1 because v3.1 changed observation shape and reward design. The current v3.1
+roadmap must define and test RN1/RN2 directly before moving to push recovery,
+friction randomization, or observation noise.
 
 ## ADR-015: Relative-State Standing V3 Attempt Stopped At Fixed-Mu Gate
 
@@ -460,7 +460,7 @@ no absolute world-height termination
 
 **Decision:** Change the environment interface to a 35D relative-state
 observation and train v3 from scratch at fixed flat `mu=0.8` before attempting
-coordinate invariance, friction, reset noise, or observation noise.
+later robustness gates.
 
 The v3 observation is:
 
@@ -481,9 +481,8 @@ relative_height = trunk_world_y - ground_top_y
 terminate if relative_height < 0.22
 ```
 
-`--ground-height-offset`, `--spawn-x`, and `--spawn-z` are evaluation controls
-for testing coordinate and height invariance. Defaults preserve the old physical
-flat-ground setup.
+`--ground-height-offset`, `--spawn-x`, and `--spawn-z` are evaluation controls.
+Defaults preserve the old physical flat-ground setup.
 
 **Evidence:** Implementation validation passed:
 
@@ -530,10 +529,9 @@ diagnostics/v3_fixed08_175k_clean_mu08_screen30/summary.json
 ```
 
 **Consequences:** Do not promote a v3 checkpoint from this run. Do not proceed
-to coordinate-invariance, friction, reset-noise, or observation-noise gates from
-this lineage yet. The relative observation and relative-height termination code
-are still the right direction, but the first scratch recipe is not enough to
-recover the clean v2 stance.
+to later robustness gates from this lineage yet. The relative observation and
+relative-height termination code are still the right direction, but the first
+scratch recipe is not enough to recover the clean v2 stance.
 
 The likely next v3 attempt should keep the relative-state interface and adjust
 the fixed-mu training recipe before another long run. Candidate changes include
@@ -543,7 +541,7 @@ using a shorter checkpoint-driven curriculum with stricter early evaluation.
 
 ## ADR-016: V3.1 Filter-State And Slip-Aligned Reward
 
-**Status:** Accepted for fixed `mu=0.8` clean standing and coordinate invariance
+**Status:** Accepted for clean fixed `mu=0.8` standing
 
 **Context:** ADR-015 showed that removing absolute world XYZ was the right
 research direction, but the first 35D v3 observation/reward recipe let the robot
@@ -621,8 +619,6 @@ python train_stand.py --save-dir runs/stand_v3p1_relative_obs65_slip_anchor_fixe
 ```text
 observation_space shape: 65
 default reset relative height: about 0.34 m
-spawn X/Z offsets do not enter the policy observation as absolute coordinates
-ground-height offset changes world Y but not relative height
 previous executed action is zero at reset and updates after the first step
 static checks passed
 ```
@@ -644,56 +640,32 @@ mean filter lag: 0.000110
 max filter lag: 0.001470
 ```
 
-Coordinate-invariance screens also passed:
-
-```text
-spawn offsets:
-  (+0.5,0), (-0.5,0), (0,+0.5), (0,-0.5),
-  (+0.5,+0.5), (+0.5,-0.5), (-0.5,+0.5), (-0.5,-0.5)
-  all 30/30 nominal
-
-ground-height offsets:
-  -0.20, -0.10, +0.10, +0.20 m
-  all 30/30 nominal
-```
-
-Compact coordinate-screen evidence:
-
-```text
-condition             survival  active drift   slip       switches  min load
-clean                 30/30     0.000207 m     0.007678 m 0         26.95 N
-worst spawn offset    30/30     0.000288 m     0.008696 m 0         26.94 N
-worst height offset   30/30     0.000206 m     0.008764 m 0         26.95 N
-```
-
 Primary evidence files:
 
 ```text
 diagnostics/v3p1_fixed08_005k_clean_mu08_confirm30/summary.json
-diagnostics/v3p1_fixed08_005k_spawn_x0p5_z0p5_confirm30/summary.json
-diagnostics/v3p1_fixed08_005k_ground_h0p20_confirm30/summary.json
 ```
 
-**Consequences:** Promote the v3.1 5k checkpoint as the active fixed-friction
-relative-state standing baseline. Do not treat it as friction-randomized or
-reset-noise accepted yet at this point in the decision log. ADR-017 later
-accepted the fixed-friction slice gate; reset-noise remains the next v3.1 gate.
-Observation noise remains deferred until reset-noise passes.
+**Consequences:** Promote the v3.1 5k checkpoint as the active clean-standing
+relative-state baseline for the Chrono position-motor runtime. Do not
+treat it as friction-randomized or reset-noise accepted. ADR-018 later corrected
+the friction-slice interpretation: friction is not accepted until pushes or
+other horizontal disturbances make it meaningful.
 
 This also confirms that v3 did not need a full 500k run to show signal once the
 observation and reward matched the slip/drift gates. Future v3.1 continuations
 should stay checkpoint-driven and promote the earliest checkpoint that passes
 the hard metrics, not the highest reward checkpoint.
 
-## ADR-017: V3.1 Friction Robustness Passed Without PPO Training
+## ADR-017: V3.1 Fixed-Friction Slice Interpretation
 
-**Status:** Accepted
+**Status:** Retracted by ADR-018
 
-**Context:** V3.1 fixed `mu=0.8` standing and coordinate-invariance screens
-passed in ADR-016. The next gate was to adapt the old v2 friction workflow to
-the active 65D v3.1 policy. Because v2 history showed that longer PPO training
-can degrade stance quality, the v3.1 friction plan was evaluation-first:
-train only if fixed slices failed.
+**Context:** V3.1 fixed `mu=0.8` clean standing passed in ADR-016. The next
+planned gate was to adapt the old v2 friction workflow to the active 65D v3.1
+policy. Because v2 history showed that longer PPO training can degrade stance
+quality, the v3.1 friction plan was evaluation-first: train only if fixed
+slices failed.
 
 The target effective range stayed the same as v2:
 
@@ -734,7 +706,7 @@ load_quality_scale and stance_quality_scale present in reward_terms
 no hard settled-quality early return remains
 ```
 
-The 30-episode bridge screen passed every slice:
+The 30-episode bridge screen recorded nominal outcomes on every slice:
 
 ```text
 mu: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
@@ -748,7 +720,7 @@ worst settled min foot load: 26.95 N
 max settled friction usage: 0.03424
 ```
 
-The 100-episode keeper confirmation also passed every slice:
+The 100-episode keeper confirmation also recorded nominal outcomes on every slice:
 
 ```text
 mu: 0.5, 0.6, 0.8, 0.9, 1.0, 1.1, 1.2
@@ -814,7 +786,204 @@ diagnostics/v3p1_friction_keeper_mu_1p1_confirm100/summary.json
 diagnostics/v3p1_friction_keeper_mu_1p2_confirm100/summary.json
 ```
 
-**Consequences:** Accept the v3.1 5k checkpoint as friction robust over
-effective `mu=0.5-1.2` without additional PPO training. Do not run the planned
-50k v3.1 friction-randomized fallback unless future code changes regress these
-gates. The next active gate is reset-state noise on v3.1.
+**Consequences:** This decision was later retracted. The diagnostics remain
+historical data, but the interpretation was wrong: quiet fixed-friction slices
+do not prove friction robustness when the standing task creates little or no
+meaningful horizontal shear. See ADR-018.
+
+## ADR-018: Friction Slice Claim Retracted Until Pushes Make Friction Meaningful
+
+**Status:** Accepted correction
+
+**Context:** V3.1 clean standing at fixed `mu=0.8` is useful because it fixed
+the original clean-standing problems: action-jitter-driven creep, contact
+switching, foot unloading, base drift, loaded-foot slip, and non-foot support.
+After that, fixed-friction slices from `mu=0.5` to `1.2` were run and initially
+described as friction robustness.
+
+That interpretation was mistaken. In quiet standing, the robot is not being
+pushed and is not required to create meaningful horizontal shear. A
+snap-to-home zero-action controller can also stand in similar quiet conditions.
+Under those conditions, changing friction values does not demonstrate that the
+learned policy can recover from slip, reject disturbances, or use friction
+robustly.
+
+**Decision:** Retract the V3.1 friction-robustness claim. The accepted V3.1
+claim is clean standing only under the Chrono position-motor actuator:
+
+```text
+fixed mu=0.8 baseline condition
+clean reset
+no pushes
+no reset-noise acceptance
+no friction-randomization acceptance
+no absolute world XYZ in policy input
+```
+
+Friction randomization and fixed-friction slice tests should not be used as
+standing-policy acceptance gates until random pushes or another disturbance
+create horizontal shear demands. Friction becomes meaningful after the policy is
+asked to recover from horizontal disturbance; before that, it is mostly a
+non-stressful parameter for this task.
+
+**Evidence:** The clean-standing diagnostic remains the accepted V3.1 evidence:
+
+```text
+diagnostics/v3p1_fixed08_005k_clean_mu08_confirm30/summary.json
+episodes: 30
+result: 30/30 nominal
+active-reference drift: 0.000207 m
+settled total contact foot slip: 0.007678 m
+settled contact switches: 0
+settled min foot load: 26.95 N
+max settled friction usage: 0.03711
+max non-foot load: 0.0
+```
+
+These metrics directly address the clean-standing failures that drove the v3.1
+work. The fixed-friction slice numbers from ADR-017 remain historical logs, but
+they are not pass evidence for friction robustness.
+
+**Consequences:** Documentation and roadmap language must describe V3.1
+friction as unaccepted. The current order is:
+
+```text
+1. define, test, and possibly train RN1/RN2 reset recovery
+2. random push recovery
+3. friction randomization after pushes make friction meaningful
+4. observation noise
+```
+
+Do not add reset-noise acceptance, push acceptance, or friction-randomization
+acceptance until those conditions are directly tested.
+
+## ADR-019: Reset-Noise Ranges Updated For Standing-Only Recovery
+
+**Status:** Implemented, not accepted
+
+**Context:** The old V3.1 RN1/RN2 reset-noise ranges were very small, omitted
+base yaw, and did not perturb base X/Z position. External standing-policy advice
+recommended using full yaw immediately because yaw is rotation about gravity,
+while keeping roll/pitch bounded so the task remains standing recovery rather
+than fall recovery. It also recommended additive joint-position noise rather
+than multiplicative scaling around the default pose.
+
+**Decision:** Redefine RN1/RN2 for standing-only reset recovery:
+
+```text
+RN1:
+  base X/Z position:        +/-0.03 m
+  base height Y:            +/-0.015 m
+  yaw about gravity:        [-pi, pi]
+  roll/pitch:               +/-0.05 rad
+  base linear X/Z velocity: +/-0.10 m/s
+  base linear Y velocity:   +/-0.03 m/s
+  base angular X/Z:         +/-0.15 rad/s
+  base angular Y/yaw:       +/-0.20 rad/s
+  joint pos hip/thigh/knee: +/-0.04 / +/-0.08 / +/-0.10 rad
+  joint velocity:           +/-0.20 rad/s
+
+RN2:
+  base X/Z position:        +/-0.10 m
+  base height Y:            +/-0.030 m
+  yaw about gravity:        [-pi, pi]
+  roll/pitch:               +/-0.12 rad
+  base linear X/Z velocity: +/-0.25 m/s
+  base linear Y velocity:   +/-0.05 m/s
+  base angular X/Z:         +/-0.40 rad/s
+  base angular Y/yaw:       +/-0.50 rad/s
+  joint pos hip/thigh/knee: +/-0.10 / +/-0.12 / +/-0.15 rad
+  joint velocity:           +/-0.50 rad/s
+```
+
+Chrono is Y-up, so base height is Chrono `Y`, horizontal position is Chrono
+`X/Z`, and yaw is rotation about Chrono `Y`. The CLI component selector was
+expanded to:
+
+```text
+combined|joint_pos|joint_vel|roll_pitch|yaw|base_height|base_position|base_velocity
+```
+
+**Evidence:** Implementation now logs explicit reset samples for base X/Z
+offset, height offset, roll, pitch, yaw, per-axis base linear velocity, per-axis
+base angular velocity, joint-position RMS, and joint-velocity RMS. Smoke
+diagnostics should be used to verify the ranges are actually sampled before any
+training or acceptance claim:
+
+```bash
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn1 --reset-noise-components combined --out diagnostics/v3p1_rn1_new_ranges_smoke3
+python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn2 --reset-noise-components combined --out diagnostics/v3p1_rn2_new_ranges_smoke3
+```
+
+**Consequences:** RN1/RN2 are now meaningful standing-reset definitions for the
+V3.1 branch, but they are not accepted. Reset-noise robustness still requires
+direct screens and, if necessary, training. RN3 remains a temporary/debug-only
+deterministic upper-RN2 probe.
+
+Follow-up implementation note: reset-noise builds now apply a whole-robot
+contact-safety lift after assembly if any foot would start below the configured
+clearance. This prevents RN1/RN2 results from being polluted by accidental
+foot-ground clipping while preserving the sampled pose geometry.
+
+## ADR-020: Separate Physics Rate From Policy Control Rate
+
+**Status:** Implemented, requires retraining/revalidation
+
+**Context:** Earlier standing runs updated the policy action every physics step.
+That made the policy/control interface effectively very high frequency. The
+project then spent a lot of reward and control design effort suppressing action
+jitter, especially with action-rate penalties and the `tau=0.05` action
+low-pass filter.
+
+After comparing against a more standard simulation loop, the better modeling
+choice became clear: physics should integrate faster than the policy updates.
+The simulator should handle fine contact/rigid-body integration, while the RL
+policy should act at a slower controller rate.
+
+**Decision:** Change the active environment timing to:
+
+```text
+physics timestep = 0.005 s  (200 Hz)
+control timestep = 0.020 s  (50 Hz)
+physics substeps per policy action = 4
+1000 RL steps = 20 s simulated time
+```
+
+The policy now chooses one action per control step. Chrono holds the same
+position target while it advances four physics substeps.
+
+**Evidence:** Static checks passed and environment metadata reports:
+
+```text
+control_time_step = 0.02
+control_frequency = 50.0
+physics_time_step = 0.005
+physics_frequency = 200.0
+physics_substeps = 4
+```
+
+A one-episode compatibility smoke with the old V3.1 5k checkpoint survived but
+did not preserve the old slip metric:
+
+```text
+diagnostics/control50hz_retiming_smoke1/summary.json
+episodes: 1
+result: nominal
+active-reference drift: 0.000059 m
+settled total contact foot slip: 0.238558 m
+settled contact switches: 0
+settled min foot load: 26.87 N
+action_filter_tau: 0.05
+alpha: 0.285714
+```
+
+**Consequences:**
+
+- The 50 Hz timing is a simulator/control-interface correction, not a reward
+  trick.
+- The older reward function and action-filter settings were partly compensating
+  for too-fast policy updates.
+- Old V3.1 checkpoints are useful source/history, but they are not automatically
+  accepted under the new timing.
+- The next training run should simplify or retune reward terms for the slower
+  control rate instead of continuing to pile on smoothness rewards.

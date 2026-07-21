@@ -1,16 +1,14 @@
 # Standing V2 Model Card
 
-> Historical note: this is the old fixed-friction model card. The last accepted
-> v2 baseline is the randomized 10k checkpoint with `action_filter_tau=0.05`
-> and foot friction `2.0`, documented in
-> [fixed_friction_standing.md](fixed_friction_standing.md) and
-> [../reproduction_ladder.md](../reproduction_ladder.md). This page is kept for
-> provenance, not as the active baseline.
+> Historical note: this is the old fixed-friction model card. This page is kept
+> for v2 provenance. The later accepted v2 robustness baseline is the randomized
+> 10k checkpoint with `action_filter_tau=0.05` and foot friction `2.0`; the
+> active v3.1 worktree is the position-motor clean-standing baseline.
 
 ## Summary
 
-Flat-ground standing v2 was an early accepted fixed-friction milestone for the
-Chrono Go1 environment. It stood for the full 1000-step episode, kept all four
+Flat-ground standing v2 was an accepted fixed-friction milestone for the Chrono Go1
+environment. It stood for the full 1000-step episode, kept all four
 feet near the terrain, avoided non-foot leg contact, and had no obvious
 vibration in the viewer. Later settled-window diagnostics showed it was not
 final-clean standing.
@@ -124,8 +122,12 @@ nonfoot_load_max=(FR:+0.0,FL:+0.0,RR:+0.0,RL:+0.0)
 
 ## Historical Limitations
 
-- This was fixed-friction flat-ground standing, not the current robust baseline.
-- Later work accepted randomized effective friction `0.5-1.2`.
+- This was fixed-friction flat-ground standing, not the later v2 robust
+  baseline.
+- Later v2 work accepted randomized effective friction `0.5-1.2` and reset
+  noise through RN-2 in the v2/pre-relative-state lineage.
+- Those v2 claims do not transfer automatically to active v3.1 because v3.1
+  changed the observation shape and reward design.
 - The policy has not yet been validated on SCM deformable terrain.
 - Foot-contact reward magnitudes may need retuning on SCM if contact forces
   differ significantly.
