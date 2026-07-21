@@ -5,6 +5,10 @@ v2 baseline, the failed first v3 relative-state attempt, and the accepted v3.1
 fixed-standing recovery. Each entry is an
 architecture/experiment decision record.
 
+Historical commands in ADRs before ADR-020 may mention retired helper flags,
+older timing, or shape-incompatible checkpoints. For active commands, use
+`docs/reproducibility.md`.
+
 ## ADR-001: Survival-Only Fixed And AB Baselines Were Not Clean Standing
 
 **Status:** Historical / Archived
@@ -494,7 +498,7 @@ spawn offset changes world X/Z without adding those coordinates to observation
 static checks passed
 ```
 
-The first scratch training attempt used:
+The first scratch training attempt used this now-historical command:
 
 ```bash
 python train_stand.py --save-dir runs/stand_v3_relative_obs_fixed08_500k --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --timesteps 500000 --checkpoint-freq 25000 --learning-rate 0.0003 --clip-range 0.2 --action-filter-tau 0.05
@@ -608,7 +612,7 @@ load quality ramp:   clip(step / 50, 0, 1)
 stance quality ramp: clip(step / 100, 0, 1)
 ```
 
-Training used a short fixed-friction run from scratch:
+Training used this now-historical fixed-friction command:
 
 ```bash
 python train_stand.py --save-dir runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 5000 --timesteps 50000 --checkpoint-freq 5000 --learning-rate 0.0003 --clip-range 0.2 --action-filter-tau 0.05
@@ -906,14 +910,9 @@ combined|joint_pos|joint_vel|roll_pitch|yaw|base_height|base_position|base_veloc
 
 **Evidence:** Implementation now logs explicit reset samples for base X/Z
 offset, height offset, roll, pitch, yaw, per-axis base linear velocity, per-axis
-base angular velocity, joint-position RMS, and joint-velocity RMS. Smoke
-diagnostics should be used to verify the ranges are actually sampled before any
-training or acceptance claim:
-
-```bash
-python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn1 --reset-noise-components combined --out diagnostics/v3p1_rn1_new_ranges_smoke3
-python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 3 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level rn2 --reset-noise-components combined --out diagnostics/v3p1_rn2_new_ranges_smoke3
-```
+base angular velocity, joint-position RMS, and joint-velocity RMS. These ranges
+still need direct screens under the active 48D / 50 Hz environment before any
+reset-noise acceptance claim.
 
 **Consequences:** RN1/RN2 are now meaningful standing-reset definitions for the
 V3.1 branch, but they are not accepted. Reset-noise robustness still requires
@@ -987,3 +986,319 @@ alpha: 0.285714
   accepted under the new timing.
 - The next training run should simplify or retune reward terms for the slower
   control rate instead of continuing to pile on smoothness rewards.
+
+## ADR-021: Reduce Observation From 65D Back To 45D
+
+**Status:** Implemented, requires new training
+
+**Superseded by ADR-026:** The active observation is now 48D because three
+zero-command inputs were appended for the flat command-conditioned policy path.
+
+**Context:** The 65D V3.1 observation added policy inputs that helped compensate
+for the old high-frequency control setup:
+
+```text
+12 previous executed action
+4 normalized foot loads
+4 contact flags
+```
+
+After ADR-020 changed the simulator/control interface to slower 50 Hz policy
+updates with faster physics integration, that compensation is no longer the
+right default assumption. The action filter is also off by default for the next
+training run, so exposing previous filtered action is no longer part of the
+core policy input.
+
+**Decision:** Make the intermediate post-65D observation 45D:
+
+```text
+1   base height relative to ground/support
+4   trunk quaternion
+3   base linear velocity
+3   base angular velocity
+12  joint positions
+12  joint velocities
+2   support-frame base X/Z error from active standing reference
+8   support-frame per-foot anchor X/Z errors
+---
+45 total
+```
+
+Remove these 20 auxiliary inputs from the policy observation:
+
+```text
+12 previous executed action
+4 normalized foot loads
+4 contact flags
+```
+
+World X/Y/Z remain excluded from policy input. World positions may still be used
+for diagnostics, reference capture, foot anchors, and logging.
+
+**Evidence:** At the time of ADR-021, implementation metadata reported
+`observation_dimension = 45`. Existing 65D checkpoints were shape-incompatible
+with that environment.
+
+**Consequences:**
+
+- This ADR is historical context for why previous-action/load/contact inputs
+  were removed.
+- ADR-026 is the current source of truth for the active 48D observation.
+- Active training/evaluation commands omit action-filter flags.
+- Clean standing, RN1/RN2, pushes, friction randomization, and observation noise
+  all need to be re-earned under the 48D / 50 Hz setup.
+
+## ADR-022: Raw Torque-Limited PD Branch Was Replaced
+
+**Status:** Historical / replaced by ADR-024
+
+**Context:** Chrono position motors made the standing actuator unrealistically
+strong: the policy chose a joint target and the simulator drove to that target
+without exposing the policy to motor effort limits. That was useful while
+debugging observations and contact diagnostics, but it is not the actuator
+model wanted for the next standing lineage.
+
+Early torque-PD trials also showed that the full hip action range could drive
+the legs too far laterally and create a splits-like stance. Common Go1-style RL
+setups often reduce hip action authority relative to thigh/calf authority.
+
+**Decision:** Implement raw torque-limited PD as an intermediate actuator test:
+
+```text
+action scale: 0.25
+hip action indices: [0, 3, 6, 9]
+hip action multiplier: 0.5
+effective hip offset range: +/-0.125 rad
+effective thigh/calf offset range: +/-0.250 rad
+Kp: 20.0
+Kd: 0.5
+feedforward torque: none
+```
+
+Runtime control:
+
+```python
+actions_scaled = action * 0.25
+actions_scaled[[0, 3, 6, 9]] *= 0.5
+target_q = clip(home_q + actions_scaled, joint_low, joint_high)
+tau = 20.0 * (target_q - q) - 0.5 * qd
+tau = clip(tau, -effort_limit, effort_limit)
+```
+
+Reset assembly still uses temporary position motors to place the initial pose.
+The episode runtime uses force/torque actuation with clipped PD torque. In this
+PyChrono build, imported force motors expose `SetMotorFunction`; with
+`ActuationType_FORCE`, that function is the motor torque command.
+
+**Evidence:** At this raw torque-PD stage, implementation metadata reported:
+
+```text
+observation_dimension = 45
+actuator_model = torque_limited_pd
+action_scale = 0.25
+hip_action_scale_multiplier = 0.5
+pd_kp = 20.0
+pd_kd = 0.5
+```
+
+Diagnostics now log motor targets, motor torques, torque limits, torque-limit
+fractions, and saturation fraction.
+
+**Consequences:** Old position-motor checkpoints are historical/easier-actuator
+evidence. The raw torque-PD implementation itself is also historical now: it was
+replaced by the driveline/clutch implicit-limited-drive path in ADR-024 after
+zero-action checks showed it was too weak/unstable.
+
+## ADR-023: Align Active Standing Reward With Go1/A1 Position-Target Baselines
+
+**Status:** Implemented, requires training
+
+**Context:** The active limited-actuator environment had inherited custom reward
+terms from earlier position-motor and action-filter experiments: alive bonus, home-pose
+penalty, foot anchors, loaded-foot slip gates, base active-reference drift,
+contact-switch penalties, and raw-action smoothness pressure. Those terms were
+useful during earlier debugging, but they no longer match the closest Go1/A1
+position-target training stacks.
+
+`legged_gym` A1 and `walk-these-ways` Go1 use a smaller reward family around
+velocity tracking, orientation, base height, torque/action regularization, joint
+limits, and collision. They do not use a plain alive reward in the closest Go1/A1
+configs.
+
+**Decision:** Replace the active reward with a zero-command standing adaptation
+of that source-style reward:
+
+```text
+tracking_lin_vel_zero   +1.0
+tracking_ang_vel_zero   +0.5
+lin_vel_y               -2.0
+ang_vel_xz              -0.05
+orientation             -5.0
+base_height             -30.0
+torques                 -0.0001
+dof_acc                 -2.5e-7
+action_rate             -0.01
+dof_pos_limits          -10.0
+collision               -1.0
+termination             -0.0
+```
+
+The reward uses the current control timestep (`0.02 s`) as a scale multiplier
+and clips the final reward to nonnegative values, matching the positive-reward
+style used by the source environments. There is no command velocity sampler:
+desired horizontal velocity and desired yaw rate are hardcoded to zero for
+standing.
+
+Old custom standing terms remain logged as diagnostics, but their reward weights
+are `0.0`.
+
+**Evidence:** Implementation metadata reports the source-style reward weights,
+`alive_reward = False`, `command_velocity_sampler = False`, and
+`old_custom_terms = diagnostics only with zero reward weights`.
+
+**Consequences:** Existing models trained under the previous custom standing
+reward should not be interpreted as results for this reward. The user will train
+the next model manually under the aligned reward and select checkpoints using
+diagnostic gates rather than reward alone.
+
+## ADR-024: Test Chrono Driveline-Based Implicit Limited Drive
+
+**Status:** Implemented, requires training
+
+**Context:** Direct `ChLinkMotorRotationAngle` position motors impose an angle
+constraint and are too strong for the active actuator model. The raw explicit
+torque-PD branch used `ChLinkMotorRotationTorque`, but zero-action standing was
+weak and tipped after about 40 steps even after sign/order calibration.
+
+Chrono exposes `ChLinkMotorRotationDriveline` for coupling a 3D rotational joint
+to 1D shaft elements. That lets the environment combine a solver-coupled drive
+with a `ChShaftsClutch` torque limit.
+
+**Decision:** Replace the active runtime actuator with:
+
+```text
+passive imported URDF revolute joint
+ChLinkMotorRotationDriveline with FREE spindle constraint
+ChShaftsMotorSpeed for desired speed
+ChShaftsClutch for URDF effort-limit torque cap
+```
+
+The policy interface is unchanged:
+
+```python
+actions_scaled = action * 0.25
+actions_scaled[[0, 3, 6, 9]] *= 0.5
+target_q = clip(home_q + actions_scaled, joint_low, joint_high)
+desired_speed = 20.0 * (target_q - q) - 0.5 * qd
+```
+
+Torque limits are applied through `ChShaftsClutch.SetTorqueLimit(...)`:
+
+```text
+hip/thigh: 23.7 Nm
+calf:      35.55 Nm
+```
+
+**Evidence:** `debug_actuator_calibration.py --mode implicit-drive` reported:
+
+```text
+drive_links = 12
+drive_clutches = 12
+drive_motors = 12
+clutch limits match URDF effort limits
+positive target error moved every signed joint angle in the positive direction
+zero action survived 835 steps before tip
+```
+
+The previous raw torque-PD zero-action check survived about 40 steps before tip,
+so the driveline-based actuator is a clear implementation improvement.
+
+A follow-up gain sweep with the trained 25k policy found `Kp=15.0`, `Kd=0.8`
+was calmer than the initial `20.0/0.5` setting:
+
+```text
+10-episode screen at fixed mu=0.8:
+  survival: 10/10
+  active-reference drift: 0.026728 m
+  settled contact switches: 0
+  settled min foot load: 18.27 N
+  max friction usage: 0.317
+```
+
+The checkpoint used in that sweep was still trained under the old `20.0/0.5`
+setting, so this is fallback gain-selection evidence, not the active path. The
+active path returns to the common Go1/A1-style `20.0/0.5` baseline first.
+
+**Consequences:** This is actuator validation, not a trained standing result.
+No clean-standing, RN1/RN2, push, friction, or observation-noise claims are
+accepted until a policy is trained and evaluated under this actuator.
+
+## ADR-025: Use A Flat Command-Conditioned Policy Instead Of HRL
+
+**Status:** Planned direction
+
+**Context:** A hierarchical controller was considered for standing/walking
+transitions, but HRL adds architectural complexity before the low-level
+standing, actuation, reward, and diagnostics are solved. The current project
+needs a simpler controller target that can be evaluated directly.
+
+**Decision:** Use one flat command-conditioned policy. Standing is the zero
+command case:
+
+```text
+command_vx = 0
+command_vz = 0
+command_yaw_rate = 0
+```
+
+Future walking/turning uses nonzero planar velocity and yaw-rate commands. The
+likely locomotion observation is:
+
+```text
+current 45D relative-state observation
++ 3 command inputs: command_vx, command_vz, command_yaw_rate
+= 48D
+```
+
+A world model can still be added later for prediction, planning, or learned
+representations, but it is not the controller switch between separate standing
+and walking policies.
+
+**Consequences:** Documentation should treat clean standing as the first
+zero-command skill in the eventual flat policy family, not as a separate final
+policy. The command inputs are present in the active 48D observation, but they
+remain hardcoded to zero until clean standing is measurable under the active
+actuator. Friction randomization remains deferred until pushes or locomotion
+create meaningful horizontal shear.
+
+## ADR-026: Add Command Inputs To Active Standing Observation
+
+**Status:** Implemented, requires retraining
+
+**Context:** ADR-025 chose a flat command-conditioned policy instead of HRL. To
+avoid another observation-shape break later, the standing environment should
+already expose the future command channels even while training standing only.
+
+**Decision:** Expand the active observation from 45D to 48D by appending:
+
+```text
+command_vx
+command_vz
+command_yaw_rate
+```
+
+For current standing training these values are hardcoded to zero. The reward
+now tracks base X/Z velocity and yaw rate against those command values, so the
+zero-command standing behavior is unchanged in intent.
+
+**Evidence:** Environment metadata reports `observation_dimension = 48` and
+the observation-space smoke check should return:
+
+```text
+(48,) (48,)
+```
+
+**Consequences:** All 45D checkpoints are now shape-incompatible with the active
+environment. The next accepted model must be trained under the 48D observation.
+Future locomotion can start by sampling nonzero commands without another
+observation layout change.

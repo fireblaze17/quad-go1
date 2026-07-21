@@ -1,216 +1,215 @@
-# Handoff: V3.1 Position-Motor Standing Baseline
+# Handoff: 48D / 50 Hz Standing Worktree
 
 This is the freshest local working-state brief. If it disagrees with runtime
 code or diagnostics JSON, trust `go1_env.py`, `project_config.py`, and the
 latest diagnostics artifacts first.
 
-## Current State
-
-The active worktree uses standing v3.1:
+## Active State
 
 ```text
-65D relative-state observation
-no absolute world XYZ in policy input
-relative-height termination
-Chrono position-motor actuator
+environment: 48D relative-state v3.1 plus zero command
+actuator: Chrono implicit limited drive
+drive gains: Kp=20.0, Kd=0.5 speed setpoint
+torque limits: URDF effort limits through ChShaftsClutch
+home pose, joint order [FR, FL, RR, RL]:
+  FR [-0.1, 0.8, -1.5], FL [0.1, 0.8, -1.5],
+  RR [-0.1, 1.0, -1.5], RL [0.1, 1.0, -1.5]
+action scale: 0.25
+hip action half-scale: indices [0, 3, 6, 9] use effective scale 0.125
+action filter: removed from active path
+physics timestep: 0.005 s  (200 Hz)
+control timestep: 0.020 s  (50 Hz)
+physics substeps per policy action: 4
+episode length: 1000 RL steps = 20 s simulated time
 ```
 
-Current checkpoint:
+There is no accepted 48D model yet. The active future path in
+`project_config.py` is:
+
+```text
+runs/stand_v4_implicit_limited_drive_reward_aligned_1m/best_model.zip
+```
+
+Historical/source checkpoint only, incompatible with active 48D observation:
 
 ```text
 runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
 ```
 
-The directory name contains `50k` because it was the planned run folder. The
-promoted checkpoint is `5000_steps.zip`; do not describe this model as trained
-for 50k steps.
+That folder says `50k` because it was the planned run folder. The checkpoint was
+promoted at 5000 PPO timesteps.
 
-Accepted scope:
+## What Is True Now
+
+Accepted in code design:
 
 ```text
-absolute world XYZ removed from policy input
+no absolute world XYZ in policy input
 relative-height termination
-Chrono position-motor action interface restored
-50 Hz control / 200 Hz physics timing implemented
-action_filter_tau = 0.05 for filtered-control comparisons
-home pose per leg = [0.0, 0.7, -1.4]
-action scale = 0.20
+implicit limited drive action interface
+50 Hz control / 200 Hz physics timing
+48D observation
+reset-noise sampler support remains available
+```
+
+Long-term controller direction:
+
+```text
+single flat command-conditioned policy
+standing = zero command [vx=0, vz=0, yaw_rate=0]
+active observation = 48D, with command inputs currently hardcoded to zero
+world model = future auxiliary/prediction component, not an HRL policy switcher
 ```
 
 Not accepted yet:
 
 ```text
-clean-standing acceptance under the new 50 Hz timing
+clean standing under 48D / 50 Hz / implicit limited drive
 RN1/RN2 reset-noise robustness
-push recovery
+random push recovery
 friction randomization
 observation noise
 ```
 
-The previous V3.1 friction-slice interpretation was wrong. Since clean standing
-does not demand meaningful horizontal shear, changing friction values without
-pushes does not prove friction robustness. Friction randomization should be
-revisited after random push recovery is meaningful.
+Fixed-friction slices are not a current pass condition. Without pushes or other
+horizontal disturbances, changing friction does not meaningfully test a standing
+policy. Friction randomization should come after push recovery makes friction
+matter.
 
-The 50 Hz control retiming is also a modeling correction: earlier reward and
-filter tuning was partly compensating for policy updates that were too fast.
-See ADR-020 in `docs/experiments/fixed_friction_standing.md`.
+## Reward And Control
 
-## Previous Clean-Standing Evidence
-
-Clean fixed `mu=0.8`, no reset noise, no pushes, before the 50 Hz control
-retiming:
+The active reward is a zero-command standing adaptation of the closest
+`legged_gym` / `walk-these-ways` Go1/A1 reward style. It has no command velocity
+sampler and no alive bonus.
 
 ```text
-diagnostics/v3p1_fixed08_005k_clean_mu08_confirm30/summary.json
-episodes: 30
-result: 30/30 nominal
-active-reference drift: 0.000207 m
-settled total contact foot slip: 0.007678 m
-settled contact switches: 0
-settled min foot load: 26.95 N
-max settled friction usage: 0.03711
-max non-foot load: 0.0
+tracking_lin_vel_zero   +1.0
+tracking_ang_vel_zero   +0.5
+lin_vel_y               -2.0
+ang_vel_xz              -0.05
+orientation             -5.0
+base_height             -30.0
+torques                 -0.0001
+dof_acc                 -2.5e-7
+action_rate             -0.01
+dof_pos_limits          -10.0
+collision               -1.0
+dt scaling              0.02 s
+positive rewards only   yes
+alive reward            no
 ```
 
-This was accepted because the old clean-standing failure modes were controlled:
-long-hold foot creep, contact shuffling, foot unloading, non-foot support, base
-drift, and action-jitter-driven slip.
-
-After switching to 50 Hz control with 200 Hz physics, the old checkpoint is no
-longer automatically accepted. Current retiming smoke:
-
-```text
-diagnostics/control50hz_retiming_smoke1/summary.json
-episodes: 1
-result: 1/1 nominal
-active-reference drift: 0.000059 m
-settled total contact foot slip: 0.238558 m
-settled contact switches: 0
-settled min foot load: 26.87 N
-action_filter_tau: 0.05, alpha: 0.285714
-```
-
-## Current Reward And Control
-
-Important constants in `go1_env.py`:
-
-```python
-_HOME_JOINT_ANGLES = np.tile([0.0, 0.7, -1.4], 4).astype(np.float32)
-_ACTION_SCALE = 0.20
-_ALIVE_BONUS = 1.0
-_UPRIGHT_REWARD_WEIGHT = 0.15
-_POSE_PENALTY_WEIGHT = 0.30
-_CONTROL_PENALTY_WEIGHT = 0.03
-_ANG_VEL_PENALTY_WEIGHT = 0.01
-_XZ_VEL_PENALTY_WEIGHT = 1.00
-_JOINT_VEL_PENALTY_WEIGHT = 0.02
-_ACTION_RATE_PENALTY_WEIGHT = 0.05
-_RAW_ACTION_RATE_PENALTY_WEIGHT = 0.02
-_FILTER_LAG_PENALTY_WEIGHT = 0.02
-_TILT_PENALTY_WEIGHT = 0.25
-_FOOT_CONTACT_MEAN_WEIGHT = 1.00
-_FOOT_CONTACT_WORST_WEIGHT = 2.00
-_FOOT_SLIP_PENALTY_WEIGHT = 50.00
-_FOOT_SLIP_GATE_TOTAL = 0.03
-_FOOT_ANCHOR_PENALTY_WEIGHT = 0.10
-_BASE_DRIFT_PENALTY_WEIGHT = 0.05
-_CONTACT_SWITCH_PENALTY_WEIGHT = 0.10
-_ANCHOR_RESET_PENALTY_WEIGHT = 0.50
-_ANCHOR_DEACTIVATION_PENALTY_WEIGHT = 1.00
-_LOAD_QUALITY_RAMP_STEPS = 50
-_STANCE_QUALITY_RAMP_STEPS = 100
-_MIN_FOOT_LOAD = 20.0
-```
+Old custom standing terms are still diagnostics-only with zero reward weight:
+foot anchors, loaded-foot slip, base drift, contact switches, foot loads,
+raw-action rate, pose/home penalty, and action/control magnitude.
 
 Action interface:
 
 ```python
-target_q = clip(home_q + 0.20 * executed_action, joint_low, joint_high)
+actions_scaled = action * 0.25
+actions_scaled[[0, 3, 6, 9]] *= 0.5
+target_q = clip(home_q + actions_scaled, joint_low, joint_high)
+desired_speed = 20.0 * (target_q - q) - 0.5 * qd
+ChShaftsMotorSpeed tracks desired_speed through ChShaftsClutch torque limits
 ```
 
-The action filter is part of the control interface:
-
-```python
-alpha = dt / (tau + dt)
-executed_action = previous_executed_action + alpha * (raw_action - previous_executed_action)
-```
-
-Timing:
+Implicit-drive validation:
 
 ```text
-physics timestep = 0.005 s  (200 Hz)
-control timestep = 0.020 s  (50 Hz)
-physics substeps per policy action = 4
-1000 RL steps = 20 s simulated time
+all 12 driveline motors created
+clutch limits match URDF effort limits
+positive target error moves every signed joint angle positive
+zero action: 835 steps before tip, versus ~40 under raw torque-PD
+15.0/0.8 gain sweep is fallback evidence; active path is 20.0/0.5 first
 ```
 
-With `tau=0.05` and control `dt=0.020`, `alpha=0.285714`.
+## Historical Notes
 
-## Decision Table
+The 65D v3.1 checkpoint previously fixed clean-standing failure modes under the
+old timing: contact shuffling, foot creep, action jitter, unloading, non-foot
+support, and base drift. That result is useful evidence, but it must be
+re-earned in the active 48D environment.
 
-| Run / model | Key change | Main result | Decision |
-|---|---|---|---|
-| old fixed/AB baselines | early standing/friction attempts | survival hid drift/slip/contact problems | Historical |
-| anchor5 support checkpoint | foot-anchor/support improvement | better support, long-hold creep remained | Rejected as final |
-| base drift weight `10.0` | stronger stationarity | worse drift, switching, unloading | Rejected |
-| freeze-action diagnostic | freeze action after 1000 steps | slip collapsed; action jitter identified | Accepted diagnostic |
-| jitter-suppression 5k | higher action-rate and joint-velocity pressure | drift improved, one-foot creep persisted | Intermediate |
-| normalized foot-slip `0.05` | load-weighted slip reward | did not improve failure mode | Rejected |
-| stance-shape `0.05`/`0.005` | relative-foot stance reward | failed to beat jitter baseline | Rejected |
-| action filter `tau=0.05` | low-pass policy actions | fixed clean standing creep | Accepted control interface |
-| v2 filtered/friction/reset lineage | pre-v3 robustness work | accepted in v2, not transferable to v3.1 | Historical accepted |
-| v3 relative 35D | removed absolute XYZ | survived but failed slip gate | Rejected recipe |
-| v3.1 65D 5k | relative obs, filter-state input, slip-aligned reward | clean standing accepted | Active baseline |
-| V3.1 friction slices | fixed friction changes without pushes | not meaningful for robustness | Retracted interpretation |
+The 50 Hz control retiming is a modeling correction. Earlier action filtering
+and smoothness rewards were partly compensating for a too-fast policy update
+rate.
 
 ## Canonical Commands
 
-Compile active code:
+Static check:
 
 ```bash
-python -m py_compile go1_env.py train_stand.py evaluate_stand.py diagnose_policy.py view_stand_policy.py run_regression.py compare_friction_slices.py friction_curriculum.py analyze_slip_timeline.py diagnostics.py project_config.py view_env.py chrono_go1_soil.py
+python -m py_compile go1_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_env.py analyze_slip_timeline.py diagnostics.py project_config.py chrono_go1_soil.py
 ```
 
-View current baseline:
+Observation-shape check:
 
 ```bash
-python view_stand_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --max-steps 1000 --action-filter-tau 0.05
+python -c "from go1_env import Go1Env; e=Go1Env(max_steps=1); o,_=e.reset(); print(o.shape, e.observation_space.shape); e.close()"
 ```
 
-Run a clean diagnostic:
+Expected:
+
+```text
+(48,) (48,)
+```
+
+Train:
 
 ```bash
-python diagnose_policy.py runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 1 --max-steps 1000 --action-filter-tau 0.05 --reset-noise-level clean --reset-noise-components combined --out diagnostics/v3p1_position_motor_clean_mu08_smoke1
+python train_stand.py \
+  --save-dir runs/stand_v4_implicit_limited_drive_reward_aligned_1m \
+  --terrain flat \
+  --friction-min 0.8 \
+  --friction-max 0.8 \
+  --max-steps 1000 \
+  --timesteps 1000000 \
+  --checkpoint-freq 25000 \
+  --learning-rate 0.0003 \
+  --clip-range 0.2 \
+  --eval-during-training \
+  --eval-freq 25000 \
+  --eval-episodes 5 \
+  --early-stop-patience 5 \
+  --early-stop-min-delta 1.0
+```
+
+Evaluate:
+
+```bash
+python diagnose_policy.py runs/stand_v4_implicit_limited_drive_reward_aligned_1m/checkpoints/stand_policy_25000_steps.zip \
+  --terrain flat \
+  --friction-min 0.8 \
+  --friction-max 0.8 \
+  --episodes 30 \
+  --max-steps 1000 \
+  --reset-noise-level clean \
+  --reset-noise-components combined \
+  --out diagnostics/v4_implicit_limited_drive_025k_clean30
+```
+
+View:
+
+```bash
+python view_stand_policy.py runs/stand_v4_implicit_limited_drive_reward_aligned_1m/checkpoints/stand_policy_25000_steps.zip \
+  --terrain flat \
+  --friction-min 0.8 \
+  --friction-max 0.8 \
+  --max-steps 1000
 ```
 
 ## Next Step
 
-RN1/RN2 reset-noise ranges are defined but not accepted yet. Test them directly
-before training.
+Train and screen clean 48D / 50 Hz / implicit-limited-drive standing first. Do not move to
+RN1/RN2 until clean standing passes again.
+
+After that:
 
 ```text
-RN1: yaw [-pi, pi], roll/pitch +/-0.05 rad, base X/Z +/-0.03 m,
-     height +/-0.015 m, linear X/Z +/-0.10 m/s, linear Y +/-0.03 m/s,
-     angular X/Z +/-0.15 rad/s, angular Y +/-0.20 rad/s,
-     joint pos hip/thigh/knee +/-0.04 / +/-0.08 / +/-0.10 rad,
-     joint velocity +/-0.20 rad/s
-
-RN2: yaw [-pi, pi], roll/pitch +/-0.12 rad, base X/Z +/-0.10 m,
-     height +/-0.030 m, linear X/Z +/-0.25 m/s, linear Y +/-0.05 m/s,
-     angular X/Z +/-0.40 rad/s, angular Y +/-0.50 rad/s,
-     joint pos hip/thigh/knee +/-0.10 / +/-0.12 / +/-0.15 rad,
-     joint velocity +/-0.50 rad/s
+1. add nonzero command sampling and train flat command-conditioned locomotion
+2. RN1/RN2 reset recovery
+3. random push recovery
+4. friction randomization after pushes/locomotion make friction meaningful
+5. observation noise
+6. world model once base behavior is measurable
 ```
-
-Current progression:
-
-```text
-1. test and possibly train RN1/RN2 reset recovery
-2. random push recovery
-3. friction randomization after pushes make friction meaningful
-4. observation noise
-```
-
-RN3 is a temporary/debug-only deterministic upper-RN2 probe and should not be
-documented as accepted.

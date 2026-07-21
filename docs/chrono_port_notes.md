@@ -121,7 +121,7 @@ contact and foot-support fixes.
 **Consequences:**
 
 - Easier to stabilize for the standing baseline.
-- Chrono position motors remain the active runtime actuator for the current
+- Chrono position motors were the historical runtime actuator for the earlier
   V3.1 clean-standing baseline.
 - Walking may need the scale revisited if 0.20 limits step length.
 - The action-scale decision should be revisited when locomotion policies are
@@ -291,19 +291,25 @@ q_rel = frame1.GetRot().GetInverse() * frame2.GetRot()
 ```
 
 ```python
-_JOINT_AXES      = np.array([0,2,2, 0,2,2, 0,2,2, 0,2,2], dtype=np.int32)
-_JOINT_AXIS_SIGN = np.where(_JOINT_AXES == 0, 1.0, -1.0)
+_JOINT_AXES      = np.array([2,2,2, 2,2,2, 2,2,2, 2,2,2], dtype=np.int32)
+_JOINT_AXIS_SIGN = -np.ones(12, dtype=np.float32)
 ```
 
-Geometric derivation:
+Reset validation with the active mirrored Go1 home pose showed every motor-frame
+joint rotation on Chrono Z:
 
-- Hip: URDF X remains Chrono X after the spawn rotation, so sign is +1.
-- Thigh/calf: URDF Y maps to Chrono -Z after the -90 degree spawn rotation, so
-  the Z rotation vector component must be multiplied by -1.
+- FR/RR hip target `-0.1` produced `rotvec.z=+0.1`.
+- FL/RL hip target `+0.1` produced `rotvec.z=-0.1`.
+- Thigh target `+0.8` or `+1.0` produced negative `rotvec.z`.
+- Calf target `-1.5` produced positive `rotvec.z`.
+
+Therefore the active mapping reads Chrono Z for all 12 actuated joints and
+multiplies by `-1` to recover the policy/observation joint coordinate.
 
 **Consequences:**
 
 - Pose error is now meaningful at reset.
+- Hip pose error is meaningful for mirrored left/right home targets.
 - Any policy trained before this observation fix is invalid for pose-reward
   tuning.
 
@@ -410,12 +416,12 @@ foot_contact_penalty = 0.10 * mean(missing_foot_load**2)
 
 ## ADR-013: Keep Position Motors As The Active Standing Actuator
 
-**Status:** Accepted for the active V3.1 branch
+**Status:** Superseded by ADR-014
 
 **Context:** The current project phase is focused on learning Project Chrono and
 reinforcement-learning workflow around a standing controller. The accepted V3.1
 checkpoint was trained and diagnosed with Chrono position motors, and the active
-code path is kept aligned with that checkpoint.
+code path was kept aligned with that checkpoint.
 
 **Decision:** Use Chrono position motors as the runtime actuator in `Go1Env`.
 The policy outputs normalized home-centered joint-position offsets:
@@ -425,7 +431,7 @@ target_q = clip(home_q + 0.20 * executed_action, joint_low, joint_high)
 motor_function.SetConstant(target_q)
 ```
 
-The active home pose is:
+The historical position-motor home pose was:
 
 ```text
 [0.0, 0.7, -1.4] per leg
@@ -439,11 +445,53 @@ work.
 
 **Consequences:**
 
-- The simulator and docs now match the V3.1 clean-standing checkpoint.
-- Reset-noise and push tests should be interpreted as tests of this
-  position-motor standing baseline.
-- Torque-actuator work is outside the active branch and is not part of the
-  current reproducibility path.
+- Position-motor results remain historical/easier-actuator evidence.
+- They are not accepted under the active implicit-limited-drive dynamics.
+
+---
+
+## ADR-014: Chrono Implicit Limited Drive Is The Active Standing Actuator
+
+**Status:** Implemented, requires retraining
+
+**Context:** Position motors hide effort limits. For the next standing lineage,
+the policy should still output normalized joint-position targets, but the
+simulator should apply those targets through a solver-coupled drive with torque
+limits. Direct Chrono angle motors are imposed-angle constraints, while the raw
+explicit torque-PD branch was unstable/weak for zero-action standing.
+
+**Decision:** Use a Chrono driveline-based limited drive:
+
+```python
+actions_scaled = action * 0.25
+actions_scaled[[0, 3, 6, 9]] *= 0.5
+target_q = clip(home_q + actions_scaled, joint_low, joint_high)
+desired_speed = 20.0 * (target_q - q) - 0.5 * qd
+ChShaftsMotorSpeed tracks desired_speed through ChShaftsClutch torque limits
+```
+
+The hip half-scale was added because full hip action authority produced
+splits-like lateral leg motion in early torque-PD trials.
+
+The active zero-action home pose uses the Go1-style mirrored target
+in the repo joint order `[FR, FL, RR, RL]`:
+
+```text
+FR [-0.1, 0.8, -1.5], FL [0.1, 0.8, -1.5],
+RR [-0.1, 1.0, -1.5], RL [0.1, 1.0, -1.5]
+```
+
+Torque-direction calibration showed that a positive Chrono torque command
+already increases the signed joint angle returned by `_read_joint_angles()`.
+The implicit-drive calibration then confirmed that a positive target error moves
+every signed joint angle in the positive direction.
+
+**Consequences:**
+
+- The active actuator is `implicit_limited_drive`.
+- The active drive gains are `Kp=20.0`, `Kd=0.5`.
+- Torque limits are enforced by `ChShaftsClutch` using URDF effort limits.
+- Old position-motor checkpoints require retraining before acceptance.
 
 ---
 

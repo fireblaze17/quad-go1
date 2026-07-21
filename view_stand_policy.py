@@ -18,7 +18,6 @@ from diagnostics import (
 from go1_env import Go1Env, _HOME_JOINT_ANGLES, _JOINT_NAMES
 from project_config import (
     CURRENT_BASELINE_MODEL,
-    DEFAULT_ACTION_FILTER_TAU,
     DEFAULT_VIEWER_FRICTION_RANGE,
     SB3_DEVICE,
 )
@@ -47,17 +46,6 @@ def parse_args():
     parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
     parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
     parser.add_argument(
-        "--action-filter-tau",
-        type=float,
-        default=DEFAULT_ACTION_FILTER_TAU,
-        help="Environment action low-pass filter time constant in seconds.",
-    )
-    parser.add_argument(
-        "--no-action-filter",
-        action="store_true",
-        help="Disable action filtering even if the viewer default would enable it.",
-    )
-    parser.add_argument(
         "--log-interval",
         type=int,
         default=100,
@@ -83,10 +71,7 @@ def parse_args():
         action="store_true",
         help="Close the viewer instead of rebuilding the sim when an episode ends.",
     )
-    args = parser.parse_args()
-    if args.no_action_filter:
-        args.action_filter_tau = None
-    return args
+    return parser.parse_args()
 
 
 def print_joint_debug(obs) -> None:
@@ -214,7 +199,6 @@ def main() -> None:
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
-        action_filter_tau=args.action_filter_tau,
         reset_noise_level=args.reset_noise_level,
         reset_noise_components=args.reset_noise_components,
         spawn_x=args.spawn_x,
@@ -234,7 +218,6 @@ def main() -> None:
         f"friction=({args.friction_min:.2f}, {args.friction_max:.2f}) "
         f"spawn=({args.spawn_x:.2f}, {args.spawn_z:.2f}) "
         f"ground_height_offset={args.ground_height_offset:.2f} "
-        f"action_filter_tau={args.action_filter_tau} "
         f"reset_noise={args.reset_noise_level}/{args.reset_noise_components}"
     )
     print(f"reset_noise_sample={reset_info['reset_noise']}")

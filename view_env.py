@@ -23,7 +23,6 @@ def parse_args():
     parser.add_argument("--ground-height-offset", type=float, default=0.0)
     parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
     parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
-    parser.add_argument("--action-filter-tau", type=float, default=None)
     parser.add_argument("--disable-motors", action="store_true")
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument(
@@ -80,7 +79,6 @@ def main() -> None:
         terrain=args.terrain,
         enable_motors=not args.disable_motors,
         friction_range=(args.friction_min, args.friction_max),
-        action_filter_tau=args.action_filter_tau,
         reset_noise_level=args.reset_noise_level,
         reset_noise_components=args.reset_noise_components,
         spawn_x=args.spawn_x,

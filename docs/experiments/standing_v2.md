@@ -73,11 +73,11 @@ foot_contact_penalty    0.10 * mean(missing_foot_load^2)
 `leg_symmetry_error` was logged for diagnosis, but was not used as an active
 reward penalty in this historical baseline.
 
-## Evaluation Command
+## Evaluation Record
 
-```bash
-python evaluate_stand.py runs/stand/final_model.zip --terrain flat --friction-min 0.8 --friction-max 0.8 --episodes 10
-```
+The original evaluation was produced by an older helper workflow that has since
+been retired. Use this section as historical evidence, not as an active command
+reference.
 
 Accepted evaluation:
 

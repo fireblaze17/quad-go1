@@ -28,17 +28,11 @@ def parse_args():
     parser.add_argument("--ground-height-offset", type=float, default=0.0)
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
-    parser.add_argument("--save-dir", type=Path, default=Path("runs/stand_v3p1_position_motor"))
+    parser.add_argument("--save-dir", type=Path, default=Path("runs/stand_v4_implicit_limited_drive_reward_aligned_1m"))
     parser.add_argument("--load", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--reset-noise-level", choices=RESET_NOISE_LEVELS, default="clean")
     parser.add_argument("--reset-noise-components", choices=RESET_NOISE_COMPONENTS, default="combined")
-    parser.add_argument(
-        "--action-filter-tau",
-        type=float,
-        default=None,
-        help="Optional environment action low-pass filter time constant in seconds.",
-    )
     parser.add_argument(
         "--learning-rate",
         type=float,
@@ -71,7 +65,7 @@ def parse_args():
     parser.add_argument(
         "--eval-freq",
         type=int,
-        default=5_000,
+        default=25_000,
         help="Evaluate every N environment steps when --eval-during-training is enabled.",
     )
     parser.add_argument(
@@ -125,7 +119,6 @@ def make_env(args):
         terrain=args.terrain,
         enable_motors=True,
         friction_range=(args.friction_min, args.friction_max),
-        action_filter_tau=args.action_filter_tau,
         reset_noise_level=args.reset_noise_level,
         reset_noise_components=args.reset_noise_components,
         ground_height_offset=args.ground_height_offset,
@@ -142,7 +135,6 @@ def make_eval_env(args):
             args.friction_min if args.eval_friction_min is None else args.eval_friction_min,
             args.friction_max if args.eval_friction_max is None else args.eval_friction_max,
         ),
-        action_filter_tau=args.action_filter_tau,
         reset_noise_level=args.reset_noise_level
         if args.eval_reset_noise_level is None
         else args.eval_reset_noise_level,

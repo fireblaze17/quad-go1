@@ -21,7 +21,7 @@ from diagnostics import (
     foot_xz_positions,
 )
 from go1_env import Go1Env, _TIME_STEP
-from project_config import DEFAULT_ACTION_FILTER_TAU, SB3_DEVICE
+from project_config import SB3_DEVICE
 
 
 _LOAD_IMBALANCE_THRESHOLD = 0.25
@@ -86,44 +86,7 @@ def parse_args():
         default=250,
         help="Number of final steps to summarize as the settled standing window.",
     )
-    parser.add_argument(
-        "--freeze-after-steps",
-        type=int,
-        default=None,
-        help="After this many policy steps, reuse the mean action from the preceding freeze window.",
-    )
-    parser.add_argument(
-        "--freeze-average-window",
-        type=int,
-        default=100,
-        help="Number of policy actions to average before freezing.",
-    )
-    parser.add_argument(
-        "--action-filter-tau",
-        type=float,
-        default=DEFAULT_ACTION_FILTER_TAU,
-        help="Eval-only action low-pass filter time constant in seconds.",
-    )
-    parser.add_argument(
-        "--no-action-filter",
-        action="store_true",
-        help="Disable action filtering even if the script default would enable it.",
-    )
-    args = parser.parse_args()
-    if args.no_action_filter:
-        args.action_filter_tau = None
-    if args.freeze_after_steps is not None and args.freeze_after_steps <= 0:
-        parser.error("--freeze-after-steps must be positive when provided")
-    if args.freeze_average_window <= 0:
-        parser.error("--freeze-average-window must be positive")
-    if (
-        args.freeze_after_steps is not None
-        and args.freeze_average_window > args.freeze_after_steps
-    ):
-        parser.error("--freeze-average-window cannot exceed --freeze-after-steps")
-    if args.action_filter_tau is not None and args.action_filter_tau <= 0.0:
-        parser.error("--action-filter-tau must be positive when provided")
-    return args
+    return parser.parse_args()
 
 
 def _json_ready(value: Any) -> Any:
@@ -268,8 +231,11 @@ def _empty_window_summary() -> dict[str, Any]:
         "mean_abs_executed_action_delta": 0.0,
         "max_abs_executed_action_delta": 0.0,
         "executed_action_rate_per_leg": {leg: 0.0 for leg in LEG_PREFIXES},
-        "mean_filter_lag": 0.0,
-        "max_filter_lag": 0.0,
+        "mean_abs_motor_torque": 0.0,
+        "max_abs_motor_torque": 0.0,
+        "mean_torque_limit_fraction": 0.0,
+        "max_torque_limit_fraction": 0.0,
+        "fraction_torque_saturated": 0.0,
         "joint_error_from_nominal": 0.0,
     }
 
@@ -296,7 +262,11 @@ def _window_summary(
     executed_actions = np.stack([item["executed_action"] for item in records]).astype(np.float64)
     raw_action_deltas = np.stack([item["raw_action_delta"] for item in records]).astype(np.float64)
     executed_action_deltas = np.stack([item["executed_action_delta"] for item in records]).astype(np.float64)
-    filter_lags = np.stack([item["filter_lag"] for item in records]).astype(np.float64)
+    mean_abs_motor_torque = np.array([item["mean_abs_motor_torque"] for item in records], dtype=np.float64)
+    max_abs_motor_torque = np.array([item["max_abs_motor_torque"] for item in records], dtype=np.float64)
+    mean_torque_limit_fraction = np.array([item["mean_torque_limit_fraction"] for item in records], dtype=np.float64)
+    max_torque_limit_fraction = np.array([item["max_torque_limit_fraction"] for item in records], dtype=np.float64)
+    fraction_torque_saturated = np.array([item["fraction_torque_saturated"] for item in records], dtype=np.float64)
     joints = np.stack([item["joint_pos"] for item in records]).astype(np.float64)
     final = records[-1]
     reset_base_x = float(final.get("base_reset_x", reset_base_xz[0]))
@@ -444,8 +414,11 @@ def _window_summary(
         "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_deltas))),
         "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_deltas))),
         "executed_action_rate_per_leg": executed_action_rate_per_leg,
-        "mean_filter_lag": float(np.mean(np.abs(filter_lags))),
-        "max_filter_lag": float(np.max(np.abs(filter_lags))),
+        "mean_abs_motor_torque": float(np.mean(mean_abs_motor_torque)),
+        "max_abs_motor_torque": float(np.max(max_abs_motor_torque)),
+        "mean_torque_limit_fraction": float(np.mean(mean_torque_limit_fraction)),
+        "max_torque_limit_fraction": float(np.max(max_torque_limit_fraction)),
+        "fraction_torque_saturated": float(np.mean(fraction_torque_saturated)),
         "joint_error_from_nominal": float(np.mean((joints - home_joint_angles) ** 2)),
     }
 
@@ -539,8 +512,6 @@ def _timeline_row(
     executed_action: np.ndarray,
     raw_action_delta: np.ndarray,
     executed_action_delta: np.ndarray,
-    action_mode: str,
-    action_filter_alpha: float | None,
     terms: dict[str, float],
     foot_stats: dict[str, Any],
     contact_stats: dict[str, Any],
@@ -618,14 +589,20 @@ def _timeline_row(
         "lin_vel_z": terms.get("lin_vel_z", 0.0),
         "mean_abs_action": terms.get("mean_abs_action", 0.0),
         "mean_abs_action_delta": terms.get("mean_abs_action_delta", 0.0),
-        "action_mode": action_mode,
-        "action_filter_alpha": "" if action_filter_alpha is None else action_filter_alpha,
         "mean_abs_raw_action_delta": float(np.mean(np.abs(raw_action_delta))),
         "max_abs_raw_action_delta": float(np.max(np.abs(raw_action_delta))),
         "mean_abs_executed_action_delta": float(np.mean(np.abs(executed_action_delta))),
         "max_abs_executed_action_delta": float(np.max(np.abs(executed_action_delta))),
-        "mean_filter_lag": float(np.mean(np.abs(raw_action - executed_action))),
-        "max_filter_lag": float(np.max(np.abs(raw_action - executed_action))),
+        "actuator_model": terms.get("actuator_model", ""),
+        "pd_kp": terms.get("pd_kp", 0.0),
+        "pd_kd": terms.get("pd_kd", 0.0),
+        "action_scale": terms.get("action_scale", 0.0),
+        "hip_action_scale_multiplier": terms.get("hip_action_scale_multiplier", 0.0),
+        "mean_abs_motor_torque": terms.get("mean_abs_motor_torque", 0.0),
+        "max_abs_motor_torque": terms.get("max_abs_motor_torque", 0.0),
+        "mean_torque_limit_fraction": terms.get("mean_torque_limit_fraction", 0.0),
+        "max_torque_limit_fraction": terms.get("max_torque_limit_fraction", 0.0),
+        "fraction_torque_saturated": terms.get("fraction_torque_saturated", 0.0),
         "mean_abs_joint_vel": terms.get("mean_abs_joint_vel", 0.0),
         "leg_symmetry_error": terms.get("leg_symmetry_error", 0.0),
         "foot_dxz_max": foot_stats["foot_dxz_max"],
@@ -666,7 +643,6 @@ def _timeline_row(
         "executed_actions": json.dumps(np.asarray(executed_action, dtype=float).tolist()),
         "raw_action_deltas": json.dumps(np.asarray(raw_action_delta, dtype=float).tolist()),
         "executed_action_deltas": json.dumps(np.asarray(executed_action_delta, dtype=float).tolist()),
-        "filter_lag": json.dumps(np.asarray(raw_action - executed_action, dtype=float).tolist()),
     }
 
 
@@ -772,13 +748,7 @@ def diagnose_episode(
     reset_yaw = _yaw_from_obs(obs)
     prev_raw_action = np.zeros(12, dtype=np.float32)
     prev_executed_action = np.zeros(12, dtype=np.float32)
-    filter_initialized = False
-    action_filter_alpha = None
-    if args.action_filter_tau is not None:
-        action_filter_alpha = float(_TIME_STEP / (args.action_filter_tau + _TIME_STEP))
     prev_contacts = [False] * len(FOOT_BODY_NAMES)
-    freeze_action_buffer: list[np.ndarray] = []
-    frozen_action: np.ndarray | None = None
     records: list[dict[str, Any]] = []
 
     events = {
@@ -825,31 +795,13 @@ def diagnose_episode(
     final_foot_stats: dict[str, Any] = {}
 
     while not done:
-        if frozen_action is None:
-            raw_action, _ = model.predict(obs, deterministic=True)
-            raw_action = np.asarray(raw_action, dtype=np.float32)
-            action_mode = "policy"
-        else:
-            raw_action = frozen_action.copy()
-            action_mode = "frozen"
-        if action_filter_alpha is None:
-            executed_action = raw_action.copy()
-        elif not filter_initialized:
-            executed_action = raw_action.copy()
-            filter_initialized = True
-        else:
-            executed_action = prev_executed_action + action_filter_alpha * (raw_action - prev_executed_action)
-            executed_action = executed_action.astype(np.float32)
+        raw_action, _ = model.predict(obs, deterministic=True)
+        raw_action = np.asarray(raw_action, dtype=np.float32)
+        executed_action = raw_action.copy()
         raw_action_delta = raw_action - prev_raw_action
         executed_action_delta = executed_action - prev_executed_action
         obs, reward, terminated, truncated, info = env.step(executed_action)
         steps += 1
-        if action_mode == "policy":
-            freeze_action_buffer.append(raw_action.copy())
-            if len(freeze_action_buffer) > args.freeze_average_window:
-                freeze_action_buffer.pop(0)
-            if args.freeze_after_steps is not None and steps == args.freeze_after_steps:
-                frozen_action = np.mean(np.stack(freeze_action_buffer), axis=0).astype(np.float32)
         total_reward += float(reward)
         done = bool(terminated or truncated)
         terms = info.get("reward_terms", {})
@@ -956,13 +908,16 @@ def diagnose_episode(
             "contacts": contacts,
             "contact_switches": contact_switches,
             "contact_slip_increment": contact_slip_increment,
-            "action_mode": action_mode,
             "action": executed_action.astype(float).copy(),
             "raw_action": raw_action.astype(float).copy(),
             "executed_action": executed_action.astype(float).copy(),
             "raw_action_delta": raw_action_delta.astype(float).copy(),
             "executed_action_delta": executed_action_delta.astype(float).copy(),
-            "filter_lag": (raw_action - executed_action).astype(float).copy(),
+            "mean_abs_motor_torque": float(terms.get("mean_abs_motor_torque", 0.0)),
+            "max_abs_motor_torque": float(terms.get("max_abs_motor_torque", 0.0)),
+            "mean_torque_limit_fraction": float(terms.get("mean_torque_limit_fraction", 0.0)),
+            "max_torque_limit_fraction": float(terms.get("max_torque_limit_fraction", 0.0)),
+            "fraction_torque_saturated": float(terms.get("fraction_torque_saturated", 0.0)),
             "joint_pos": obs[11:23].astype(float).copy(),
         })
 
@@ -976,8 +931,6 @@ def diagnose_episode(
                 executed_action,
                 raw_action_delta,
                 executed_action_delta,
-                action_mode,
-                action_filter_alpha,
                 terms,
                 foot_stats,
                 contact_stats,
@@ -1012,18 +965,14 @@ def diagnose_episode(
         "effective_friction": effective_friction,
         "spawn": spawn,
         "material_properties": material_properties,
+        "actuator": {
+            "model": final_terms.get("actuator_model", ""),
+            "pd_kp": final_terms.get("pd_kp", 0.0),
+            "pd_kd": final_terms.get("pd_kd", 0.0),
+            "action_scale": final_terms.get("action_scale", 0.0),
+            "hip_action_scale_multiplier": final_terms.get("hip_action_scale_multiplier", 0.0),
+        },
         "reset_noise": reset_noise,
-        "freeze_action": {
-            "enabled": args.freeze_after_steps is not None,
-            "freeze_step": args.freeze_after_steps,
-            "freeze_average_window": args.freeze_average_window,
-            "frozen_action": None if frozen_action is None else frozen_action.astype(float).tolist(),
-        },
-        "action_filter": {
-            "enabled": args.action_filter_tau is not None,
-            "tau": args.action_filter_tau,
-            "alpha": action_filter_alpha,
-        },
         "final_tilt_direction": _tilt_direction(final_terms),
         "final_axis_up": {
             "trunk_x_up": float(final_terms.get("trunk_x_up", 0.0)),
@@ -1093,8 +1042,11 @@ def _aggregate_window(episodes: list[dict[str, Any]], window_name: str) -> dict[
         "max_abs_raw_action_delta",
         "mean_abs_executed_action_delta",
         "max_abs_executed_action_delta",
-        "mean_filter_lag",
-        "max_filter_lag",
+        "mean_abs_motor_torque",
+        "max_abs_motor_torque",
+        "mean_torque_limit_fraction",
+        "max_torque_limit_fraction",
+        "fraction_torque_saturated",
         "joint_error_from_nominal",
     )
     result = {
@@ -1334,24 +1286,11 @@ def aggregate_summaries(episodes: list[dict[str, Any]], args) -> dict[str, Any]:
         },
         "ground_height_offset": args.ground_height_offset,
         "material_properties": material_properties,
+        "actuator": episodes[0].get("actuator", {}) if episodes else {},
         "reset_noise": {
             "level": args.reset_noise_level,
             "components": args.reset_noise_components,
             "episode_samples": [item.get("reset_noise", {}) for item in episodes],
-        },
-        "freeze_action": {
-            "enabled": args.freeze_after_steps is not None,
-            "freeze_step": args.freeze_after_steps,
-            "freeze_average_window": args.freeze_average_window,
-            "frozen_actions": [
-                item.get("freeze_action", {}).get("frozen_action")
-                for item in episodes
-            ],
-        },
-        "action_filter": {
-            "enabled": args.action_filter_tau is not None,
-            "tau": args.action_filter_tau,
-            "alpha": None if args.action_filter_tau is None else float(_TIME_STEP / (args.action_filter_tau + _TIME_STEP)),
         },
         "episodes": len(episodes),
         "survival_rate": 1.0 - failures / max(1, len(episodes)),
@@ -1423,20 +1362,6 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
     if aggregate.get("effective_friction_min_seen") is not None:
         print(f"effective_friction_min_seen: {aggregate['effective_friction_min_seen']:.3f}")
         print(f"effective_friction_max_seen: {aggregate['effective_friction_max_seen']:.3f}")
-    if aggregate.get("freeze_action", {}).get("enabled"):
-        freeze = aggregate["freeze_action"]
-        print(
-            "freeze_action: "
-            f"step={freeze['freeze_step']} "
-            f"window={freeze['freeze_average_window']}"
-        )
-    if aggregate.get("action_filter", {}).get("enabled"):
-        action_filter = aggregate["action_filter"]
-        print(
-            "action_filter: "
-            f"tau={action_filter['tau']} "
-            f"alpha={action_filter['alpha']:.6f}"
-        )
     print(f"cause_counts: {aggregate['cause_counts']}")
     print(f"failure_type_counts: {aggregate['failure_type_counts']}")
     print(f"final_tilt_directions: {aggregate['final_tilt_directions']}")
@@ -1464,8 +1389,11 @@ def print_aggregate(aggregate: dict[str, Any]) -> None:
         "mean_abs_raw_action_delta",
         "mean_abs_executed_action_delta",
         "max_abs_executed_action_delta",
-        "mean_filter_lag",
-        "max_filter_lag",
+        "mean_abs_motor_torque",
+        "max_abs_motor_torque",
+        "mean_torque_limit_fraction",
+        "max_torque_limit_fraction",
+        "fraction_torque_saturated",
     ):
         print(f"  {key}: {settled[key]:.6f}")
 
