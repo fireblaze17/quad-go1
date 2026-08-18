@@ -44,6 +44,10 @@ def foot_debug_stats(
     speeds = []
     heights = []
     contact_loads = []
+    force_xyz = []
+    force_x = []
+    force_y = []
+    force_z = []
     tangential_forces = []
     friction_usage = []
     positions = []
@@ -52,15 +56,22 @@ def foot_debug_stats(
         pos = body.GetPos()
         vel = body.GetPosDt()
         force = body.GetContactForce()
+        fx = float(force.x)
+        fy = float(force.y)
+        fz = float(force.z)
         dx = float(pos.x) - reset_x
         dz = float(pos.z) - reset_z
-        normal_force = abs(float(force.y))
-        tangential_force = (float(force.x) ** 2 + float(force.z) ** 2) ** 0.5
+        normal_force = abs(fy)
+        tangential_force = (fx ** 2 + fz ** 2) ** 0.5
         positions.append((float(pos.x), float(pos.z)))
         displacements.append((dx * dx + dz * dz) ** 0.5)
         speeds.append((float(vel.x) ** 2 + float(vel.z) ** 2) ** 0.5)
         heights.append(float(pos.y))
         contact_loads.append(normal_force)
+        force_xyz.append((fx, fy, fz))
+        force_x.append(fx)
+        force_y.append(fy)
+        force_z.append(fz)
         tangential_forces.append(tangential_force)
         if effective_mu is None or effective_mu <= 0.0:
             friction_usage.append(0.0)
@@ -81,8 +92,13 @@ def foot_debug_stats(
         "foot_vxz_mean": sum(speeds) / len(speeds),
         "foot_vxz_max": max(speeds),
         "foot_heights": heights,
+        "foot_contact_force_xyz": force_xyz,
+        "foot_contact_force_x": force_x,
+        "foot_contact_force_y": force_y,
+        "foot_contact_force_z": force_z,
         "foot_contact_loads": contact_loads,
         "foot_normal_forces": contact_loads,
+        "foot_horizontal_forces": tangential_forces,
         "foot_tangential_forces": tangential_forces,
         "foot_friction_usage": friction_usage,
         "foot_load_shares": load_shares,

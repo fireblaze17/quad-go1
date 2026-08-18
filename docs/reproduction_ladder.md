@@ -1,249 +1,135 @@
 # Reproduction Ladder
 
-This guide records the closest reproduction order from an untrained standing
-policy to the current active 48D worktree. Run artifacts under `runs/` are
-gitignored, so exact checkpoint reproduction requires sharing those artifacts
-out of band.
+This ladder is the current default path for reproducing the active baseline behavior.
 
-## Current Active Target
+The baseline model zip is not tracked by git. Before running the baseline viewer or diagnostics from a fresh checkout, place the model at:
 
 ```text
-environment: 48D relative-state v3.1 plus zero command
-actuator: Chrono implicit limited drive
-drive gains: Kp=20.0, Kd=0.5 speed setpoint
-torque limits: URDF effort limits through ChShaftsClutch
-home pose, joint order [FR, FL, RR, RL]:
-  FR [-0.1, 0.8, -1.5], FL [0.1, 0.8, -1.5],
-  RR [-0.1, 1.0, -1.5], RL [0.1, 1.0, -1.5]
-action scale: 0.25
-hip action half-scale: indices [0, 3, 6, 9] use effective scale 0.125
-action filter: removed from active path
-physics timestep: 0.005 s  (200 Hz)
-control timestep: 0.020 s  (50 Hz)
-physics substeps per policy action: 4
-episode length: 1000 RL steps = 20 s simulated time
-active future model: runs/stand_v4_implicit_limited_drive_reward_aligned_1m/best_model.zip
+runs/default_baseline/checkpoints/default_baseline.zip
 ```
 
-There is no accepted 48D implicit-limited-drive model yet.
-
-The intended final controller is one flat command-conditioned policy. Standing
-is the zero-command case. The active 48D observation already includes three
-command inputs (`vx`, `vz`, yaw rate), currently hardcoded to zero, instead of
-introducing an HRL stand/walk switch.
-
-## Stage 0: Environment Check
+## 1. Compile
 
 ```bash
-conda activate chrono-go1
-python -m py_compile go1_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_env.py analyze_slip_timeline.py diagnostics.py project_config.py chrono_go1_soil.py
-python -c "from go1_env import Go1Env; e=Go1Env(max_steps=1); o,_=e.reset(); print(o.shape, e.observation_space.shape); e.close()"
+python -m py_compile go1_env.py go1_scm_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
 ```
 
-Expected observation shape:
-
-```text
-(48,) (48,)
-```
-
-## Stage 1: Historical V2 Standing
-
-Historical purpose: first working fixed-friction standing controller.
-
-Approximate original command:
+## 2. Environment Smoke
 
 ```bash
-python train_stand.py --terrain flat --friction-min 0.8 --friction-max 0.8 --timesteps 500000 --seed 1 --save-dir runs/stand
+python - <<'PY'
+from go1_env import Go1Env
+env = Go1Env()
+obs, info = env.reset(seed=1)
+print(obs.shape)
+print(env.action_space)
+print(info["actuator_model"])
+print(info["material"]["ground_friction"])
+print(info["command_mode"])
+env.close()
+PY
 ```
 
-What it taught:
+Expected:
 
 ```text
-survival is not enough
-settled drift, loaded-foot slip, contact switches, and non-foot contacts matter
+(48,)
+Box(-100.0, 100.0, (12,), float32)
+actuator_net
+0.8
+default
 ```
 
-Status: historical. Do not use v2 as the active baseline.
+## 3. View Baseline
 
-## Stage 2: Historical Support/Jitter Cleanup
+```bash
+python view_stand_policy.py
+```
 
-Historical purpose: diagnose why visually stable policies still crept over long
-holds.
+## 4. Fixed Forward Diagnostic
 
-Key outcomes:
+```bash
+python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
+  --fixed-command-vx -0.5 \
+  --fixed-command-vz 0.0 \
+  --fixed-command-yaw-rate 0.0 \
+  --episodes 1 \
+  --max-steps 1000 \
+  --out diagnostics/default_forward_eval \
+  --log-every-step
+```
+
+Outputs:
 
 ```text
-anchor/support diagnostics exposed long-hold creep
-freeze-action diagnostic identified action jitter
-jitter-suppression fine-tune improved clean standing
-normalized foot-slip and stance-shape reward branches were rejected
-action filtering worked under the old fast-control setup
+diagnostics/default_forward_eval/summary.json
+diagnostics/default_forward_eval/episodes.json
+diagnostics/default_forward_eval/timeline.csv
 ```
 
-Status: historical evidence. The active code no longer uses the action filter.
+## 5. Fixed Lateral Diagnostic
 
-## Stage 3: Historical V3/V3.1 Relative-State Work
-
-Historical purpose: remove absolute world XYZ from the policy input.
-
-```text
-v3 35D: removed absolute XYZ but failed slip gate
-v3.1 65D: added filter-state/load/contact inputs and slip-aligned rewards
+```bash
+python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
+  --fixed-command-vx 0.0 \
+  --fixed-command-vz 0.5 \
+  --fixed-command-yaw-rate 0.0 \
+  --episodes 1 \
+  --max-steps 1000 \
+  --out diagnostics/default_lateral_eval \
+  --log-every-step
 ```
 
-Historical source checkpoint:
-
-```text
-runs/stand_v3p1_relative_obs65_slip_anchor_fixed08_50k/checkpoints/stand_policy_5000_steps.zip
-```
-
-This checkpoint was clean-standing evidence under the old timing, but it is
-shape-incompatible with the active 48D environment.
-
-## Stage 4: Friction Interpretation Correction
-
-Fixed-friction slices without pushes were reclassified as not meaningful for
-standing robustness. A clean standing pose does not necessarily demand
-horizontal shear, so changing friction alone may not test the policy. Friction
-randomization should come after random push recovery exists.
-
-Status: corrected interpretation, not an accepted robustness claim.
-
-## Stage 5: Sim/Control-Rate Correction
-
-Active correction:
-
-```text
-physics integration: 0.005 s / 200 Hz
-policy control: 0.020 s / 50 Hz
-substeps per policy action: 4
-1000 RL steps: 20 s simulated time
-```
-
-Reason: smoothness should be handled first by a sane simulator/control-rate
-split, not only by reward shaping and action filtering.
-
-Status: implemented. Requires new training, and old position-motor checkpoints
-are easier-actuator history.
-
-## Stage 6: 65D To 45D Observation Reduction
-
-Active observation:
-
-```text
-1   base height relative to ground/support
-4   trunk quaternion
-3   base linear velocity
-3   base angular velocity
-12  joint positions
-12  joint velocities
-2   support-frame base X/Z error from active standing reference
-8   support-frame per-foot anchor X/Z errors
----
-45 total
-```
-
-Removed from the old 65D observation:
-
-```text
-12 previous executed action
-4 normalized foot loads
-4 contact flags
-```
-
-Status: implemented. Existing 65D checkpoints are incompatible, and older
-position-motor checkpoints are not accepted under the implicit-limited-drive dynamics.
-
-## Stage 6.1: Add Command Inputs For Flat Policy
-
-Active observation is now 48D:
-
-```text
-45D relative-state standing observation
-3 command inputs: command_vx, command_vz, command_yaw_rate
----
-48 total
-```
-
-Status: implemented with zero commands for standing. Requires new training.
-
-## Stage 6.5: Align Reward With Go1/A1 Implicit-Limited-Drive Baselines
-
-Active reward:
-
-```text
-tracking_lin_vel_zero, tracking_ang_vel_zero, lin_vel_y, ang_vel_xz,
-orientation, base_height, torques, dof_acc, action_rate, dof_pos_limits,
-collision
-```
-
-There is no alive reward and no command velocity sampler. The zero velocity
-target is hardcoded for standing. Older custom terms such as foot anchors,
-loaded-foot slip, base drift, contact switches, and foot-load penalties remain
-diagnostics only with zero reward weight.
-
-Status: implemented. Requires new training.
-
-## Stage 7: Train Active 45D Model
+## 6. Train A New Default Run
 
 ```bash
 python train_stand.py \
-  --save-dir runs/stand_v4_implicit_limited_drive_reward_aligned_1m \
-  --terrain flat \
-  --friction-min 0.8 \
-  --friction-max 0.8 \
-  --max-steps 1000 \
-  --timesteps 1000000 \
-  --checkpoint-freq 25000 \
-  --learning-rate 0.0003 \
-  --clip-range 0.2 \
-  --eval-during-training \
-  --eval-freq 25000 \
-  --eval-episodes 5 \
-  --early-stop-patience 5 \
-  --early-stop-min-delta 1.0
+  --save-dir runs/default_new_run \
+  --target-total-steps 100000000 \
+  --checkpoint-freq 1000000
 ```
 
-Promote by diagnostics, not training reward alone.
+## 7. SCM Deformable Terrain Diagnostic
 
-Clean screen:
+CRM/SPH was tested, but it is too computationally heavy for practical fine-tuning on this setup. SCM is the active deformable-terrain backend.
 
 ```bash
-python diagnose_policy.py runs/stand_v4_implicit_limited_drive_reward_aligned_1m/checkpoints/stand_policy_25000_steps.zip \
-  --terrain flat \
-  --friction-min 0.8 \
-  --friction-max 0.8 \
-  --episodes 30 \
+python diagnose_policy.py \
+  --env-backend scm \
+  runs/default_baseline/checkpoints/default_baseline.zip \
+  --fixed-command-vx -0.5 \
+  --fixed-command-vz 0.0 \
+  --fixed-command-yaw-rate 0.0 \
+  --episodes 1 \
   --max-steps 1000 \
-  --reset-noise-level clean \
-  --reset-noise-components combined \
-  --out diagnostics/v4_implicit_limited_drive_025k_clean30
+  --out diagnostics/default_scm_forward_eval \
+  --log-every-step
 ```
 
-Pass gate:
+## 8. SCM VSG Viewer
 
-```text
-survival_rate = 1.0
-active-reference drift <= 0.03 m
-settled total loaded-foot slip <= 0.03 m
-settled contact switches = 0 preferred
-settled min foot load near/above 20 N
-max_nonfoot_load = 0
-no repeated meaningful failure class
+```bash
+python view_scm_policy_vsg.py \
+  runs/default_baseline/checkpoints/default_baseline.zip \
+  --fixed-command-vx -0.5 \
+  --fixed-command-vz 0.0 \
+  --fixed-command-yaw-rate 0.0 \
+  --max-steps 500 \
+  --render-fps 1000000 \
+  --ignore-termination
 ```
 
-## Stage 8: Next After Clean 45D Standing
+## 9. Continue A Run
 
-Do these only after Stage 7 passes:
+Use the saved model and state from the run:
 
-```text
-1. add nonzero command sampling
-2. train flat command-conditioned locomotion on flat ground
-3. RN1/RN2 reset recovery
-4. random push recovery
-5. friction randomization after pushes/locomotion make friction meaningful
-6. observation noise
-7. world model once base behavior is measurable
+```bash
+python train_stand.py \
+  --save-dir runs/default_new_run_continued \
+  --resume-model runs/default_new_run/final_model.zip \
+  --resume-state runs/default_new_run/final_model.state.json \
+  --target-total-steps 150000000 \
+  --checkpoint-freq 1000000
 ```
 
-RN3 is debug/stretch only.
+`--resume-model` loads the policy. `--resume-state` restores the global timestep counter used for continuation accounting.

@@ -1,19 +1,53 @@
-name: chrono-go1
+name: chrono-src
 channels:
-  - projectchrono
+  - nvidia
   - conda-forge
-  - defaults
 dependencies:
   - python=3.12
-  - pychrono=10.0.0
-  - numpy=2.4
-  - assimp
-  - irrlicht
-  - urdfdom
+
+  # Build toolchain for source Chrono + Python bindings.
+  - c-compiler
+  - cxx-compiler
+  - git=2.55.0=pl5321h5685339_1
+  - cmake=4.4.1=hc85cc9f_0
+  - ninja=1.13.2=h171cf75_0
+  - swig=4.4.*
+  # Pin the working pkg-config build. Newer builds in the clean-room test
+  # failed to parse conda-forge's xcb.pc Libs.private field during VSG CMake.
+  - pkg-config=0.29.2=h4bc722e_1009
+
+  # Chrono dependencies resolved inside conda where possible.
+  - eigen=5.0.*
+  - urdfdom=6.0.*
+  - urdfdom_headers=3.0.*
+  - libxcb=1.17.*
+  - xorg-libxau=1.0.12=hb03c661_1
+  - xorg-libxdmcp=1.1.5=hb03c661_1
+  - xorg-xproto=7.0.31=hb9d3cd8_1008
+  - xcb-util=0.4.*
+  - xcb-util-image
+  - xcb-util-keysyms
+  - xcb-util-renderutil
+  - xcb-util-wm
+  - libvulkan-loader
+  - libvulkan-headers
+
+  # CUDA toolkit used to build Chrono FSI/SPH. PyTorch stays CPU-only below.
+  - cuda-toolkit=12.8.*
+  - cuda-nvcc=12.8.*
+  - cuda-libraries=12.8.*
+  - cuda-libraries-dev=12.8.*
+  - cuda-cudart=12.8.*
+  - cuda-cccl_linux-64=12.8.*
+
+  # Project runtime.
+  - numpy=2.5.*
   - pip
   - pip:
-      - gymnasium==1.2.3
-      - stable-baselines3==2.8.0
-      - torch==2.11.0
-      - matplotlib==3.10.9
-      - pandas==3.0.2
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.13.0+cpu
+      - gymnasium==1.3.0
+      - stable-baselines3==2.9.0
+      - matplotlib==3.11.1
+      - pandas==3.0.5
+      - tensorboard==2.21.0
