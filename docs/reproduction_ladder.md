@@ -1,52 +1,163 @@
 # Reproduction Ladder
 
-This ladder is the current default path for reproducing the active baseline behavior.
+This ladder records the model lineage used for the project result: train the flat NSC actuator-net policy, then fine-tune that policy on SCM.
 
-The baseline model zip is not tracked by git. Before running the baseline viewer or diagnostics from a fresh checkout, place the model at:
+Model zips are not tracked by git. A fresh checkout needs these artifacts placed at:
+
+```text
+runs/default_baseline/checkpoints/flat_150m_baseline.zip
+runs/default_baseline/checkpoints/default_baseline.zip
+```
+
+## Stage 1: Flat NSC Baseline
+
+The flat baseline artifact is:
+
+```text
+runs/default_baseline/checkpoints/flat_150m_baseline.zip
+```
+
+It is a neutral copy of:
+
+```text
+runs/go1_nvidia_flat_reward_dr_actuator_net_v1_200m/checkpoints/stand_policy_149997600_steps.zip
+```
+
+Training configuration:
+
+```text
+terrain: flat
+friction: 0.8
+actuator_model: actuator_net
+action_clip: 100
+num_envs: 24
+n_steps: 256
+batch_size: 1536
+n_epochs: 3
+learning_rate: 1e-4
+learning_rate_final: 1e-4
+clip_range: 0.1
+target_kl: 0.015
+ent_coef: 0.001
+gamma: 0.99
+gae_lambda: 0.95
+max_grad_norm: 1.0
+checkpoint_freq: 1000000
+target_total_steps: 200000000
+selected checkpoint: 149997600 steps
+```
+
+Equivalent reproduction command:
+
+```bash
+python train_stand.py \
+  --save-dir runs/flat_nsc_baseline_repro \
+  --target-total-steps 200000000 \
+  --max-steps 1000 \
+  --actuator-model actuator_net \
+  --num-envs 24 \
+  --n-steps 256 \
+  --batch-size 1536 \
+  --n-epochs 3 \
+  --learning-rate 0.0001 \
+  --learning-rate-final 0.0001 \
+  --clip-range 0.1 \
+  --target-kl 0.015 \
+  --ent-coef 0.001 \
+  --gamma 0.99 \
+  --gae-lambda 0.95 \
+  --max-grad-norm 1.0 \
+  --checkpoint-freq 1000000
+```
+
+View the flat baseline on NSC:
+
+```bash
+python view_stand_policy.py runs/default_baseline/checkpoints/flat_150m_baseline.zip
+```
+
+## Stage 2: SCM Fine-Tune
+
+The promoted project baseline is:
 
 ```text
 runs/default_baseline/checkpoints/default_baseline.zip
 ```
 
-## 1. Compile
-
-```bash
-python -m py_compile go1_env.py go1_scm_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
-```
-
-## 2. Environment Smoke
-
-```bash
-python - <<'PY'
-from go1_env import Go1Env
-env = Go1Env()
-obs, info = env.reset(seed=1)
-print(obs.shape)
-print(env.action_space)
-print(info["actuator_model"])
-print(info["material"]["ground_friction"])
-print(info["command_mode"])
-env.close()
-PY
-```
-
-Expected:
+It is a neutral copy of:
 
 ```text
-(48,)
-Box(-100.0, 100.0, (12,), float32)
-actuator_net
-0.8
-default
+runs/default_scm_finetune_lr3e5_clip005_from516m_v1_100m_continue/checkpoints/stand_policy_570990864_steps.zip
 ```
 
-## 3. View Baseline
+Fine-tuning configuration:
+
+```text
+env_backend: scm
+actuator_model: actuator_net
+num_envs: 24
+n_steps: 256
+batch_size: 1536
+n_epochs: 3
+learning_rate: 3e-5
+learning_rate_final: 3e-5
+clip_range: 0.05
+target_kl: 0.001
+ent_coef: 0.001
+gamma: 0.99
+gae_lambda: 0.95
+max_grad_norm: 0.5
+checkpoint_freq: 1000000
+selected checkpoint: 570990864 steps
+```
+
+Equivalent fine-tuning command:
 
 ```bash
-python view_stand_policy.py
+python train_stand.py \
+  --env-backend scm \
+  --save-dir runs/default_scm_finetune_repro \
+  --resume-model runs/default_baseline/checkpoints/flat_150m_baseline.zip \
+  --target-total-steps 570990864 \
+  --max-steps 1000 \
+  --actuator-model actuator_net \
+  --num-envs 24 \
+  --n-steps 256 \
+  --batch-size 1536 \
+  --n-epochs 3 \
+  --learning-rate 0.00003 \
+  --learning-rate-final 0.00003 \
+  --clip-range 0.05 \
+  --target-kl 0.001 \
+  --ent-coef 0.001 \
+  --gamma 0.99 \
+  --gae-lambda 0.95 \
+  --max-grad-norm 0.5 \
+  --checkpoint-freq 1000000
 ```
 
-## 4. Fixed Forward Diagnostic
+## Verification Commands
+
+View the promoted baseline on NSC:
+
+```bash
+python view_stand_policy.py runs/default_baseline/checkpoints/default_baseline.zip
+```
+
+View the promoted baseline on SCM:
+
+```bash
+python view_scm_policy_vsg.py \
+  runs/default_baseline/checkpoints/default_baseline.zip \
+  --fixed-command-vx -0.5 \
+  --fixed-command-vz 0.0 \
+  --fixed-command-yaw-rate 0.0 \
+  --max-steps 500 \
+  --render-fps 1000000 \
+  --ignore-termination
+```
+
+Run a fixed-command NSC diagnostic:
 
 ```bash
 python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
@@ -59,39 +170,7 @@ python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip
   --log-every-step
 ```
 
-Outputs:
-
-```text
-diagnostics/default_forward_eval/summary.json
-diagnostics/default_forward_eval/episodes.json
-diagnostics/default_forward_eval/timeline.csv
-```
-
-## 5. Fixed Lateral Diagnostic
-
-```bash
-python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx 0.0 \
-  --fixed-command-vz 0.5 \
-  --fixed-command-yaw-rate 0.0 \
-  --episodes 1 \
-  --max-steps 1000 \
-  --out diagnostics/default_lateral_eval \
-  --log-every-step
-```
-
-## 6. Train A New Default Run
-
-```bash
-python train_stand.py \
-  --save-dir runs/default_new_run \
-  --target-total-steps 100000000 \
-  --checkpoint-freq 1000000
-```
-
-## 7. SCM Deformable Terrain Diagnostic
-
-CRM/SPH was tested, but it is too computationally heavy for practical fine-tuning on this setup. SCM is the active deformable-terrain backend.
+Run a fixed-command SCM diagnostic:
 
 ```bash
 python diagnose_policy.py \
@@ -105,31 +184,3 @@ python diagnose_policy.py \
   --out diagnostics/default_scm_forward_eval \
   --log-every-step
 ```
-
-## 8. SCM VSG Viewer
-
-```bash
-python view_scm_policy_vsg.py \
-  runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx -0.5 \
-  --fixed-command-vz 0.0 \
-  --fixed-command-yaw-rate 0.0 \
-  --max-steps 500 \
-  --render-fps 1000000 \
-  --ignore-termination
-```
-
-## 9. Continue A Run
-
-Use the saved model and state from the run:
-
-```bash
-python train_stand.py \
-  --save-dir runs/default_new_run_continued \
-  --resume-model runs/default_new_run/final_model.zip \
-  --resume-state runs/default_new_run/final_model.state.json \
-  --target-total-steps 150000000 \
-  --checkpoint-freq 1000000
-```
-
-`--resume-model` loads the policy. `--resume-state` restores the global timestep counter used for continuation accounting.

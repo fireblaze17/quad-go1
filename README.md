@@ -315,7 +315,6 @@ python diagnose_policy.py \
 
 ## Documentation
 
-- [docs/documentation.md](docs/documentation.md) — implementation reference.
 - [docs/reproducibility.md](docs/reproducibility.md) — exact environment and run reproduction.
-- [docs/training_roadmap.md](docs/training_roadmap.md) — planned training work.
-- [docs/chrono_port_notes.md](docs/chrono_port_notes.md) — Chrono-specific notes.
+- [docs/reproduction_ladder.md](docs/reproduction_ladder.md) — flat baseline to SCM fine-tune lineage.
+- [docs/training_roadmap.md](docs/training_roadmap.md) — training settings and TensorBoard metrics.

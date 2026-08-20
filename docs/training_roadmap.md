@@ -1,18 +1,22 @@
-# Training Roadmap
+# Training Reference
 
-## Current Goal
+This document records the training settings used for the project result. The active model lineage is documented in `docs/reproduction_ladder.md`.
 
-Keep the codebase centered on the default locomotion stack and improve new runs from the current baseline.
+## Flat NSC Baseline Settings
 
-Baseline:
+Model:
 
 ```text
-runs/default_baseline/checkpoints/default_baseline.zip
+runs/default_baseline/checkpoints/flat_150m_baseline.zip
 ```
 
-## Default Training Setup
+Training settings:
 
 ```text
+terrain: flat
+friction: 0.8
+actuator_model: actuator_net
+action_clip: 100
 num_envs: 24
 n_steps: 256
 rollout_size: 6144
@@ -27,95 +31,119 @@ gamma: 0.99
 gae_lambda: 0.95
 max_grad_norm: 1.0
 checkpoint_freq: 1000000
+target_total_steps: 200000000
+selected checkpoint: 149997600 steps
 ```
 
-## Metrics To Watch
-
-- `rollout/ep_len_mean`
-- `rollout/ep_rew_mean`
-- `reward_terms/tracking_lin_vel_reward_mean`
-- `reward_terms/tracking_ang_vel_reward_mean`
-- `reward_terms/flat_orientation_l2_reward_mean`
-- `reward_terms/action_rate_reward_mean`
-- `reward_terms/torques_reward_mean`
-- `policy/std_mean`
-- `policy/mean_action_rms`
-- `policy/sampled_action_rms`
-- `feet/contact_fraction_*`
-- `feet/contact_switches_*_mean_per_env`
-
-## Interpretation
-
-- Rising reward with stable or rising episode length is healthy.
-- Falling policy standard deviation with stable reward usually means the deterministic policy is catching up to the sampled policy.
-- If velocity tracking rises but contact metrics get worse, inspect the viewer before extending the run.
-- If reward improves while episode length falls, run fixed-command diagnostics to see whether the policy is exploiting short bursts before termination.
-
-Continue a run when reward, velocity tracking, or episode length are still improving and contact behavior is not degrading. Stop or branch a run when reward and velocity tracking are flat over many checkpoints, policy standard deviation has mostly settled, and deterministic fixed-command viewers match the intended behavior.
-
-Before promoting a model, run fixed forward, fixed lateral, fixed yaw, and sampled-command viewers. Use diagnostics to confirm velocity tracking, torque saturation, action-rate penalty, contact switching, and foot-load behavior.
-
-## Default Training Command
+Reproduction command:
 
 ```bash
 python train_stand.py \
-  --save-dir runs/default_new_run \
-  --target-total-steps 100000000 \
+  --save-dir runs/flat_nsc_baseline_repro \
+  --target-total-steps 200000000 \
+  --max-steps 1000 \
+  --actuator-model actuator_net \
+  --num-envs 24 \
+  --n-steps 256 \
+  --batch-size 1536 \
+  --n-epochs 3 \
+  --learning-rate 0.0001 \
+  --learning-rate-final 0.0001 \
+  --clip-range 0.1 \
+  --target-kl 0.015 \
+  --ent-coef 0.001 \
+  --gamma 0.99 \
+  --gae-lambda 0.95 \
+  --max-grad-norm 1.0 \
   --checkpoint-freq 1000000
 ```
 
-TensorBoard:
+## SCM Fine-Tune Settings
 
-```bash
-tensorboard --logdir runs/default_new_run/tensorboard --port 6006
+Model:
+
+```text
+runs/default_baseline/checkpoints/default_baseline.zip
 ```
 
-## SCM Fine-Tuning Path
+Training settings:
 
-CRM/SPH was tested, but it is too computationally heavy for practical fine-tuning on this setup. SCM is the active deformable-terrain backend.
+```text
+env_backend: scm
+actuator_model: actuator_net
+num_envs: 24
+n_steps: 256
+rollout_size: 6144
+batch_size: 1536
+n_epochs: 3
+learning_rate: 3e-5
+learning_rate_final: 3e-5
+clip_range: 0.05
+target_kl: 0.001
+ent_coef: 0.001
+gamma: 0.99
+gae_lambda: 0.95
+max_grad_norm: 0.5
+checkpoint_freq: 1000000
+selected checkpoint: 570990864 steps
+```
 
-Start SCM experiments from the current baseline and keep the policy interface unchanged:
+Fine-tuning command:
 
 ```bash
 python train_stand.py \
   --env-backend scm \
-  --save-dir runs/default_scm_finetune_v1 \
-  --resume-model runs/default_baseline/checkpoints/default_baseline.zip \
-  --target-total-steps 110000000 \
+  --save-dir runs/default_scm_finetune_repro \
+  --resume-model runs/default_baseline/checkpoints/flat_150m_baseline.zip \
+  --target-total-steps 570990864 \
+  --max-steps 1000 \
+  --actuator-model actuator_net \
+  --num-envs 24 \
+  --n-steps 256 \
+  --batch-size 1536 \
+  --n-epochs 3 \
+  --learning-rate 0.00003 \
+  --learning-rate-final 0.00003 \
+  --clip-range 0.05 \
+  --target-kl 0.001 \
+  --ent-coef 0.001 \
+  --gamma 0.99 \
+  --gae-lambda 0.95 \
+  --max-grad-norm 0.5 \
   --checkpoint-freq 1000000
 ```
 
-Use the VSG viewer for qualitative SCM checks:
+## TensorBoard Metrics
+
+Primary training metrics:
+
+```text
+rollout/ep_len_mean
+rollout/ep_rew_mean
+train/approx_kl
+train/clip_fraction
+train/entropy_loss
+train/explained_variance
+train/value_loss
+policy/std_mean
+policy/mean_action_rms
+policy/sampled_action_rms
+```
+
+Reward and behavior metrics:
+
+```text
+reward_terms/tracking_lin_vel_reward_mean
+reward_terms/tracking_ang_vel_reward_mean
+reward_terms/flat_orientation_l2_reward_mean
+reward_terms/action_rate_reward_mean
+reward_terms/torques_reward_mean
+feet/contact_fraction_*
+feet/contact_switches_*_mean_per_env
+```
+
+Open TensorBoard:
 
 ```bash
-python view_scm_policy_vsg.py \
-  runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx -0.5 \
-  --fixed-command-vz 0.0 \
-  --fixed-command-yaw-rate 0.0 \
-  --max-steps 500 \
-  --render-fps 1000000 \
-  --ignore-termination
+tensorboard --logdir runs/default_new_run/tensorboard --port 6006
 ```
-
-## SCM Fork Experiments
-
-The current long SCM fine-tune line reached:
-
-```text
-runs/default_scm_finetune_to501m_v1_continue/checkpoints/stand_policy_454992720_steps.zip
-```
-
-A separate optimizer-aggressiveness fork starts from that checkpoint and changes only the PPO update size:
-
-```text
-run: runs/default_scm_finetune_lr3e5_clip005_from455m_v1_100m_fork
-resume checkpoint: runs/default_scm_finetune_to501m_v1_continue/checkpoints/stand_policy_454992720_steps.zip
-target total steps: 554992720
-learning_rate: 3e-5
-learning_rate_final: 3e-5
-clip_range: 0.05
-checkpoint_freq: 1000000
-```
-
-Everything else should stay aligned with the current SCM fine-tune recipe unless the experiment explicitly says otherwise. The training script writes the run arguments to `args.json` and PPO/TensorBoard scalars under the run's `tensorboard/` directory, so this fork can be compared against the previous `1e-5`, `clip_range=0.02` line.
