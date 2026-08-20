@@ -142,8 +142,8 @@ PY
 ## Static Check
 
 ```bash
-python -m py_compile go1_env.py go1_scm_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
-python train_stand.py --help
+python -m py_compile go1_env.py go1_scm_env.py train_policy.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
+python train_policy.py --help
 python view_stand_policy.py --help
 python view_scm_policy_vsg.py --help
 python diagnose_policy.py --help

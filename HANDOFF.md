@@ -55,7 +55,7 @@ The policy emits action targets at 50 Hz. The actuator and Chrono integration ru
 Static check:
 
 ```bash
-python -m py_compile go1_env.py go1_scm_env.py train_stand.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
+python -m py_compile go1_env.py go1_scm_env.py train_policy.py diagnose_policy.py view_stand_policy.py view_scm_policy_vsg.py diagnostics.py ppo_compat.py project_config.py
 ```
 
 Viewer:

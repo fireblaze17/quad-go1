@@ -50,7 +50,7 @@ selected checkpoint: 149997600 steps
 Equivalent reproduction command:
 
 ```bash
-python train_stand.py \
+python train_policy.py \
   --save-dir runs/flat_nsc_baseline_repro \
   --target-total-steps 200000000 \
   --max-steps 1000 \
@@ -114,7 +114,7 @@ selected checkpoint: 570990864 steps
 Equivalent fine-tuning command:
 
 ```bash
-python train_stand.py \
+python train_policy.py \
   --env-backend scm \
   --save-dir runs/default_scm_finetune_repro \
   --resume-model runs/default_baseline/checkpoints/flat_150m_baseline.zip \

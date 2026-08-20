@@ -52,7 +52,7 @@ python view_scm_policy_vsg.py \
 Train a new default run:
 
 ```bash
-python train_stand.py \
+python train_policy.py \
   --save-dir runs/default_new_run \
   --target-total-steps 100000000 \
   --checkpoint-freq 1000000
@@ -242,14 +242,12 @@ Default training uses 24 parallel environments and a rollout of 6,144 transition
 | COM offset | None |
 | External pushes | None |
 
-Detailed noise ranges and reproduction setup live in [docs/reproducibility.md](docs/reproducibility.md).
-
 ## Training / Fine-Tuning
 
 New NSC training run:
 
 ```bash
-python train_stand.py \
+python train_policy.py \
   --save-dir runs/default_new_run \
   --target-total-steps 100000000 \
   --checkpoint-freq 1000000
@@ -258,11 +256,25 @@ python train_stand.py \
 SCM fine-tuning run:
 
 ```bash
-python train_stand.py \
+python train_policy.py \
   --env-backend scm \
-  --save-dir runs/default_scm_finetune_v1 \
-  --resume-model runs/default_baseline/checkpoints/default_baseline.zip \
-  --target-total-steps 110000000 \
+  --save-dir runs/default_scm_finetune_repro \
+  --resume-model runs/default_baseline/checkpoints/flat_150m_baseline.zip \
+  --target-total-steps 570990864 \
+  --max-steps 1000 \
+  --actuator-model actuator_net \
+  --num-envs 24 \
+  --n-steps 256 \
+  --batch-size 1536 \
+  --n-epochs 3 \
+  --learning-rate 0.00003 \
+  --learning-rate-final 0.00003 \
+  --clip-range 0.05 \
+  --target-kl 0.001 \
+  --ent-coef 0.001 \
+  --gamma 0.99 \
+  --gae-lambda 0.95 \
+  --max-grad-norm 0.5 \
   --checkpoint-freq 1000000
 ```
 
