@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -81,6 +82,7 @@ def parse_args():
     parser.add_argument("--ignore-termination", action="store_true")
     parser.add_argument("--full-diagnostics", action="store_true")
     parser.add_argument("--log-interval", type=int, default=25)
+    parser.add_argument("--start-delay-seconds", type=float, default=0.0)
     parser.add_argument("--render-fps", type=float, default=50.0)
     parser.add_argument("--visual-mesh-format", choices=VISUAL_MESH_FORMATS, default="obj")
     parser.add_argument("--show-collision-boxes", action="store_true")
@@ -94,6 +96,20 @@ def parse_args():
     parser.add_argument("--camera-target-height", type=float, default=0.30)
     parser.add_argument("--camera-lead", type=float, default=0.0)
     parser.add_argument("--camera-yaw-deg", type=float, default=45.0)
+    parser.add_argument(
+        "--viewer-command-sequence",
+        choices=("none", "forward_then_backward", "backward_then_forward"),
+        default="none",
+    )
+    parser.add_argument("--viewer-command-switch-step", type=int, default=500)
+    parser.add_argument("--viewer-sequence-forward-vx", type=float, default=-1.0)
+    parser.add_argument("--viewer-sequence-backward-vx", type=float, default=1.0)
+    parser.add_argument("--viewer-command-a-vx", type=float, default=None)
+    parser.add_argument("--viewer-command-a-vz", type=float, default=0.0)
+    parser.add_argument("--viewer-command-a-yaw-rate", type=float, default=0.0)
+    parser.add_argument("--viewer-command-b-vx", type=float, default=None)
+    parser.add_argument("--viewer-command-b-vz", type=float, default=0.0)
+    parser.add_argument("--viewer-command-b-yaw-rate", type=float, default=0.0)
     parser.add_argument("--debug-startup", action="store_true")
     return parser.parse_args()
 
@@ -170,6 +186,52 @@ def update_follow_camera(vis, env, args) -> None:
     camera, target = camera_vectors(env, args)
     vis.SetCameraPosition(camera)
     vis.SetCameraTarget(target)
+
+
+def render_vsg_frame(vis, env, args) -> None:
+    update_follow_camera(vis, env, args)
+    if hasattr(vis, "BeginScene"):
+        vis.BeginScene()
+    vis.Render()
+    if hasattr(vis, "EndScene"):
+        vis.EndScene()
+
+
+def wait_before_episode_start(vis, env, args) -> bool:
+    delay = max(0.0, float(args.start_delay_seconds))
+    if delay <= 0.0:
+        return True
+    end_time = time.monotonic() + delay
+    while time.monotonic() < end_time:
+        if vis is None or not vis.Run():
+            return False
+        render_vsg_frame(vis, env, args)
+        time.sleep(1.0 / 60.0)
+    return True
+
+
+def apply_viewer_command_sequence(env: Go1SCMEnv, args, step: int) -> bool:
+    if args.viewer_command_sequence == "none":
+        return False
+    switch_step = max(0, int(args.viewer_command_switch_step))
+    forward_vx = float(args.viewer_sequence_forward_vx)
+    backward_vx = float(args.viewer_sequence_backward_vx)
+    command_a = (
+        forward_vx if args.viewer_command_a_vx is None else float(args.viewer_command_a_vx),
+        float(args.viewer_command_a_vz),
+        float(args.viewer_command_a_yaw_rate),
+    )
+    command_b = (
+        backward_vx if args.viewer_command_b_vx is None else float(args.viewer_command_b_vx),
+        float(args.viewer_command_b_vz),
+        float(args.viewer_command_b_yaw_rate),
+    )
+    if args.viewer_command_sequence == "forward_then_backward":
+        command = command_a if step < switch_step else command_b
+    else:
+        command = command_b if step < switch_step else command_a
+    env.set_fixed_command(*command)
+    return True
 
 
 def print_compact_policy_step(episode: int, step: int, info: dict, foot_stats: dict, interval_stats: dict) -> None:
@@ -273,11 +335,16 @@ def main() -> None:
     print(
         f"viewing SCM policy={'zero_action_bypass' if args.zero_action else args.policy} actuator={args.actuator_model} "
         f"fixed=({args.fixed_command_vx:.2f},{args.fixed_command_vz:.2f},{args.fixed_command_yaw_rate:.2f}) "
+        f"sequence={args.viewer_command_sequence} switch_step={args.viewer_command_switch_step} "
         f"stochastic={args.stochastic} visual_mesh_format={args.visual_mesh_format} "
         f"show_collision_boxes={args.show_collision_boxes} render_fps={args.render_fps:.1f}"
     )
     print(f"command_sampler={reset_info.get('command_sampler')}")
     print(f"scm={reset_info.get('scm')}")
+
+    if not wait_before_episode_start(vis, env, args):
+        env.close()
+        return
 
     step = 0
     episode = 1
@@ -287,17 +354,13 @@ def main() -> None:
         while vis is not None and vis.Run():
             sim_time = float(env.step_count) * 0.02
             if sim_time + 1e-12 >= next_render_time:
-                update_follow_camera(vis, env, args)
-                if hasattr(vis, "BeginScene"):
-                    vis.BeginScene()
-                vis.Render()
-                if hasattr(vis, "EndScene"):
-                    vis.EndScene()
+                render_vsg_frame(vis, env, args)
                 while next_render_time <= sim_time + 1e-12:
                     next_render_time += render_interval
             if args.zero_action:
                 action = np.zeros(env.action_space.shape, dtype=np.float32)
             else:
+                apply_viewer_command_sequence(env, args, step)
                 action, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, _reward, terminated, truncated, info = env.step(action)
 
@@ -326,6 +389,8 @@ def main() -> None:
             if ended:
                 print(f"ep={episode:03d} ended reason={termination_reason or 'truncated'} steps={step}")
                 reset_info = reset_episode()
+                if not wait_before_episode_start(vis, env, args):
+                    break
                 step = 0
                 next_render_time = 0.0
                 episode += 1

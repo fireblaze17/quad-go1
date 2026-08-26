@@ -1,15 +1,38 @@
-"""View the default Chrono Go1 policy in Irrlicht."""
+"""View the default Chrono Go1 policy with Chrono VSG."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import numpy as np
-import pychrono as chrono
+
+
+def _import_chrono_vsg():
+    try:
+        import pychrono as chrono
+        import pychrono.vsg3d as vsg
+    except Exception as exc:
+        raise RuntimeError(
+            "NSC VSG viewer requires the source-built Chrono environment. "
+            "Run it from chrono-src with:\n"
+            '  export LD_LIBRARY_PATH="$HOME/chrono_builds/chrono-install/lib:'
+            '$HOME/chrono_builds/vsg-install/lib:/usr/lib/wsl/lib:$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"\n'
+            '  export PYTHONPATH="$HOME/chrono_builds/chrono-install/share/chrono/python:$PYTHONPATH"\n'
+            "Missing import while loading pychrono.vsg3d."
+        ) from exc
+
+    if not hasattr(vsg, "ChVisualSystemVSG"):
+        raise RuntimeError("NSC VSG viewer requires pychrono.vsg3d.ChVisualSystemVSG.")
+    return chrono, vsg
+
+
+chrono, vsg = _import_chrono_vsg()
 
 from diagnostics import (
     contact_body_groups,
@@ -60,6 +83,7 @@ def parse_args():
     parser.add_argument("--ignore-termination", action="store_true")
     parser.add_argument("--full-diagnostics", action="store_true")
     parser.add_argument("--log-interval", type=int, default=25)
+    parser.add_argument("--start-delay-seconds", type=float, default=0.0)
     parser.add_argument("--joint-debug", action="store_true")
     parser.add_argument("--no-reset-on-end", action="store_true")
     parser.add_argument("--visual-mesh-format", choices=VISUAL_MESH_FORMATS, default="obj")
@@ -70,11 +94,11 @@ def parse_args():
     parser.add_argument("--spawn-height", type=float, default=None)
     parser.add_argument("--disable-dynamic-spawn-height", action="store_true")
     parser.add_argument("--no-follow-camera", action="store_true")
-    parser.add_argument("--camera-distance", type=float, default=3.0)
-    parser.add_argument("--camera-height", type=float, default=0.65)
+    parser.add_argument("--camera-distance", type=float, default=6.0)
+    parser.add_argument("--camera-height", type=float, default=3.0)
     parser.add_argument("--camera-target-height", type=float, default=0.30)
-    parser.add_argument("--camera-lead", type=float, default=0.8)
-    parser.add_argument("--camera-yaw-deg", type=float, default=90.0)
+    parser.add_argument("--camera-lead", type=float, default=0.0)
+    parser.add_argument("--camera-yaw-deg", type=float, default=45.0)
     parser.add_argument(
         "--viewer-command-sequence",
         choices=("none", "forward_then_backward", "backward_then_forward"),
@@ -83,6 +107,12 @@ def parse_args():
     parser.add_argument("--viewer-command-switch-step", type=int, default=500)
     parser.add_argument("--viewer-sequence-forward-vx", type=float, default=-1.0)
     parser.add_argument("--viewer-sequence-backward-vx", type=float, default=1.0)
+    parser.add_argument("--viewer-command-a-vx", type=float, default=None)
+    parser.add_argument("--viewer-command-a-vz", type=float, default=0.0)
+    parser.add_argument("--viewer-command-a-yaw-rate", type=float, default=0.0)
+    parser.add_argument("--viewer-command-b-vx", type=float, default=None)
+    parser.add_argument("--viewer-command-b-vz", type=float, default=0.0)
+    parser.add_argument("--viewer-command-b-yaw-rate", type=float, default=0.0)
     parser.add_argument("--viewer-push-step", type=int, default=-1)
     parser.add_argument("--viewer-push-duration-steps", type=int, default=1)
     parser.add_argument("--viewer-push-vx", type=float, default=0.0)
@@ -90,9 +120,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def update_follow_camera(env: Go1Env, args) -> None:
-    if args.no_follow_camera or env._vis is None or env._trunk is None:
-        return
+def camera_vectors(env: Go1Env, args):
+    if env._trunk is None:
+        return chrono.ChVector3d(-1.0, 0.65, 3.0), chrono.ChVector3d(0.0, 0.3, 0.0)
     pos = env._trunk.GetPos()
     yaw = np.deg2rad(float(args.camera_yaw_deg))
     camera = chrono.ChVector3d(
@@ -105,8 +135,60 @@ def update_follow_camera(env: Go1Env, args) -> None:
         float(pos.y) + float(args.camera_target_height),
         float(pos.z),
     )
-    env._vis.SetCameraPosition(camera)
-    env._vis.SetCameraTarget(target)
+    return camera, target
+
+
+def make_vsg_visualizer(env: Go1Env, args):
+    vis = vsg.ChVisualSystemVSG()
+    vis.AttachSystem(env._system)
+    vis.SetWindowTitle("Chrono Go1 Env")
+    vis.SetWindowSize(1280, 720)
+    if hasattr(vis, "SetCameraVertical") and hasattr(chrono, "CameraVerticalDir_Y"):
+        vis.SetCameraVertical(chrono.CameraVerticalDir_Y)
+    if hasattr(vis, "EnableSkyBox"):
+        vis.EnableSkyBox()
+    if hasattr(vis, "SetBackgroundColor"):
+        vis.SetBackgroundColor(chrono.ChColor(0.08, 0.09, 0.10))
+    if hasattr(vis, "SetLightDirection"):
+        vis.SetLightDirection(-0.6, 0.8)
+    if hasattr(vis, "SetLightIntensity"):
+        vis.SetLightIntensity(1.0)
+    camera, target = camera_vectors(env, args)
+    if hasattr(vis, "AddCamera"):
+        vis.AddCamera(camera, target)
+    vis.Initialize()
+    update_follow_camera(vis, env, args)
+    return vis
+
+
+def update_follow_camera(vis, env: Go1Env, args) -> None:
+    if args.no_follow_camera or env._trunk is None:
+        return
+    camera, target = camera_vectors(env, args)
+    vis.SetCameraPosition(camera)
+    vis.SetCameraTarget(target)
+
+
+def render_vsg_frame(vis, env: Go1Env, args) -> None:
+    update_follow_camera(vis, env, args)
+    if hasattr(vis, "BeginScene"):
+        vis.BeginScene()
+    vis.Render()
+    if hasattr(vis, "EndScene"):
+        vis.EndScene()
+
+
+def wait_before_episode_start(vis, env: Go1Env, args) -> bool:
+    delay = max(0.0, float(args.start_delay_seconds))
+    if delay <= 0.0:
+        return True
+    end_time = time.monotonic() + delay
+    while time.monotonic() < end_time:
+        if vis is None or not vis.Run():
+            return False
+        render_vsg_frame(vis, env, args)
+        time.sleep(1.0 / 60.0)
+    return True
 
 
 def print_joint_debug(obs: np.ndarray) -> None:
@@ -136,13 +218,23 @@ def apply_viewer_command_sequence(env: Go1Env, args, step: int) -> bool:
     if args.viewer_command_sequence == "none":
         return False
     switch_step = max(0, int(args.viewer_command_switch_step))
-    forward = float(args.viewer_sequence_forward_vx)
-    backward = float(args.viewer_sequence_backward_vx)
+    forward_vx = float(args.viewer_sequence_forward_vx)
+    backward_vx = float(args.viewer_sequence_backward_vx)
+    command_a = (
+        forward_vx if args.viewer_command_a_vx is None else float(args.viewer_command_a_vx),
+        float(args.viewer_command_a_vz),
+        float(args.viewer_command_a_yaw_rate),
+    )
+    command_b = (
+        backward_vx if args.viewer_command_b_vx is None else float(args.viewer_command_b_vx),
+        float(args.viewer_command_b_vz),
+        float(args.viewer_command_b_yaw_rate),
+    )
     if args.viewer_command_sequence == "forward_then_backward":
-        vx = forward if step < switch_step else backward
+        command = command_a if step < switch_step else command_b
     else:
-        vx = backward if step < switch_step else forward
-    env.set_fixed_command(vx, 0.0, 0.0)
+        command = command_b if step < switch_step else command_a
+    env.set_fixed_command(*command)
     return True
 
 
@@ -228,7 +320,7 @@ def main() -> None:
 
     env_cls = env_class_for_backend(args.env_backend)
     env = env_cls(
-        render_mode="human",
+        render_mode=None,
         max_steps=args.max_steps,
         enable_motors=True,
         spawn_x=args.spawn_x,
@@ -248,6 +340,7 @@ def main() -> None:
     tracked_contacts = contact_body_groups(env)
     reset_foot_xz = foot_xz_positions(tracked_feet)
     interval_stats = new_interval_stats()
+    vis = make_vsg_visualizer(env, args)
     if args.joint_debug:
         print_joint_debug(obs)
     print(
@@ -260,13 +353,15 @@ def main() -> None:
     print(f"command_sampler={reset_info.get('command_sampler')}")
     print(f"default_randomization={reset_info.get('default_randomization')}")
 
+    if not wait_before_episode_start(vis, env, args):
+        env.close()
+        return
+
     step = 0
     episode = 1
     try:
-        while True:
-            update_follow_camera(env, args)
-            if not env.render():
-                break
+        while vis is not None and vis.Run():
+            render_vsg_frame(vis, env, args)
             apply_viewer_command_sequence(env, args, step)
             action, _ = model.predict(obs, deterministic=not args.stochastic)
             if apply_viewer_push(env, args, step) and args.log_interval >= 0:
@@ -292,8 +387,11 @@ def main() -> None:
                 tracked_contacts = contact_body_groups(env)
                 reset_foot_xz = foot_xz_positions(tracked_feet)
                 interval_stats = new_interval_stats()
+                vis = make_vsg_visualizer(env, args)
                 if args.joint_debug:
                     print_joint_debug(obs)
+                if not wait_before_episode_start(vis, env, args):
+                    break
                 step = 0
                 episode += 1
     finally:
@@ -301,4 +399,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)

@@ -6,7 +6,7 @@ This repository trains and evaluates a Unitree Go1 locomotion policy in Project 
 
 | NSC flat ground | SCM deformable terrain |
 | --- | --- |
-| `<!-- TODO: Insert NSC locomotion GIF/video -->` | `<!-- TODO: Insert SCM locomotion GIF/video -->` |
+| <video src="media/nsc_baseline.mp4" controls width="420"></video> | <video src="media/scm_baseline.mp4" controls width="420"></video> |
 | Flat-ground locomotion | Deformable-terrain locomotion |
 
 Baseline policy:

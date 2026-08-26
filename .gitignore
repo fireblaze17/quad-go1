@@ -17,5 +17,8 @@ logs/
 
 *.zip
 *.mp4
+!media/
+!media/nsc_baseline.mp4
+!media/scm_baseline.mp4
 *.avi
 *.mov

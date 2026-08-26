@@ -19,7 +19,6 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 import pychrono as chrono
-import pychrono.irrlicht as irr
 import pychrono.parsers as parsers
 import torch
 from gymnasium import spaces
@@ -668,9 +667,9 @@ class Go1Env(gym.Env):
         self._sync_joint_state_cache(use_actual_velocity=True)
         self._reset_actuator_net_history(self._reset_joint_targets)
 
+        if self.show_collision_shapes:
+            self._add_collision_visual_overlays(parser)
         if self.render_mode == "human":
-            if self.show_collision_shapes:
-                self._add_collision_visual_overlays(parser)
             self._create_visualizer(system)
 
     def _new_system(self):
@@ -917,7 +916,7 @@ class Go1Env(gym.Env):
         ground.SetName("ground")
         ground.SetFixed(True)
         ground.SetPos(chrono.ChVector3d(0, -0.5 * _FLAT_GROUND_THICKNESS + self.ground_height_offset, 0))
-        _set_visual_color(ground, chrono.ChColor(0.34, 0.34, 0.34))
+        _set_visual_color(ground, chrono.ChColor(0.46, 0.48, 0.50))
         system.AddBody(ground)
         self._add_flat_ground_grid(system)
 
@@ -927,7 +926,7 @@ class Go1Env(gym.Env):
         half_z = 0.5 * _FLAT_GROUND_WIDTH
         count_x = int(round(_FLAT_GROUND_LENGTH / _FLAT_GROUND_GRID_SPACING))
         count_z = int(round(_FLAT_GROUND_WIDTH / _FLAT_GROUND_GRID_SPACING))
-        grid_color = chrono.ChColor(0.56, 0.56, 0.56)
+        grid_color = chrono.ChColor(0.68, 0.70, 0.72)
         for i in range(count_z + 1):
             z = -half_z + i * _FLAT_GROUND_GRID_SPACING
             line = chrono.ChBodyEasyBox(
@@ -1574,6 +1573,8 @@ class Go1Env(gym.Env):
         self._reset_noise_sample["initial_max_foot_load"] = float(max(foot_loads.values(), default=0.0))
 
     def _create_visualizer(self, system) -> None:
+        import pychrono.irrlicht as irr
+
         # Always create a fresh visualizer. Reusing an initialized Irrlicht
         # device and calling AttachSystem again can crash after reset.
         self._vis = None
