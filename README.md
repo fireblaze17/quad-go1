@@ -15,7 +15,7 @@ Baseline policy:
 runs/default_baseline/checkpoints/default_baseline.zip
 ```
 
-This checkpoint path contains the tracked 571M-step SCM-fine-tuned policy used by the viewer and diagnostic commands.
+The repository includes this 571M-step SCM-fine-tuned policy at that path, so the viewer and diagnostic commands can load it directly after setup.
 
 ## Quick Start
 
