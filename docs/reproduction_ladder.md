@@ -2,7 +2,7 @@
 
 This ladder records the model lineage used for the project result: train the flat NSC actuator-net policy, then fine-tune that policy on SCM.
 
-Model zips are not tracked by git. A fresh checkout needs these artifacts placed at:
+The required baseline model artifacts are tracked in git at:
 
 ```text
 runs/default_baseline/checkpoints/flat_150m_baseline.zip

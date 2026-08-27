@@ -15,7 +15,7 @@ Baseline policy:
 runs/default_baseline/checkpoints/default_baseline.zip
 ```
 
-This checkpoint path currently contains the 571M-step SCM-fine-tuned policy. Model zips are not tracked by git, so a fresh checkout needs the baseline artifact placed at this path before running viewer or diagnostic commands.
+This checkpoint path contains the tracked 571M-step SCM-fine-tuned policy used by the viewer and diagnostic commands.
 
 ## Quick Start
 

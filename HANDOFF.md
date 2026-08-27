@@ -11,7 +11,7 @@ runs/default_baseline/checkpoints/default_baseline.zip
 It is the active locomotion baseline and should be the first model used for viewing, diagnostics, and comparison.
 It currently contains the 571M-step SCM-fine-tuned policy.
 
-Model zips are ignored by git. A fresh checkout needs the baseline artifact placed at that path before baseline viewer or diagnostic commands can load it.
+The baseline model zip is tracked at that path, so a fresh checkout can run the baseline viewer and diagnostic commands directly after the environment is set up.
 
 ## Runtime Defaults
 

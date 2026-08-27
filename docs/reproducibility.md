@@ -4,7 +4,7 @@ This document contains the setup and command path needed to reproduce the projec
 
 ## Required Artifacts
 
-Model zips are not tracked by git. Place these files before running the viewer, diagnostics, or fine-tuning commands:
+These model artifacts are tracked in git and should exist after cloning:
 
 ```text
 runs/default_baseline/checkpoints/flat_150m_baseline.zip

@@ -12,7 +12,6 @@ env/
 data/
 diagnostics/
 videos/
-runs/
 logs/
 
 *.zip
@@ -22,3 +21,11 @@ logs/
 !media/scm_baseline.mp4
 *.avi
 *.mov
+
+runs/*
+!runs/default_baseline/
+runs/default_baseline/*
+!runs/default_baseline/checkpoints/
+runs/default_baseline/checkpoints/*
+!runs/default_baseline/checkpoints/default_baseline.zip
+!runs/default_baseline/checkpoints/flat_150m_baseline.zip
