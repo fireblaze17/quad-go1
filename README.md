@@ -2,6 +2,14 @@
 
 This repository trains and evaluates a Unitree Go1 locomotion policy in Project Chrono / PyChrono. The policy is trained with PPO and tracks body-frame planar velocity plus yaw-rate commands. Control is actuator-network-driven torque control, with execution on both NSC rigid terrain and SCM deformable terrain.
 
+## What This Project Does
+
+- Trains a Unitree Go1 locomotion policy in Project Chrono / PyChrono.
+- Uses PPO with a Gymnasium-compatible Chrono environment.
+- Tracks body-frame sagittal, lateral, and yaw-rate commands.
+- Runs on both NSC rigid terrain and SCM deformable terrain.
+- Includes the trained 571M-step baseline model in the repository.
+
 ## Policy Showcase
 
 | NSC flat ground | SCM deformable terrain |
@@ -283,47 +291,6 @@ TensorBoard:
 ```bash
 tensorboard --logdir runs/default_new_run/tensorboard --port 6006
 ```
-
-## Evaluation and Diagnostics
-
-Fixed-command NSC viewer:
-
-```bash
-python view_stand_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx -0.5 \
-  --fixed-command-vz 0.0 \
-  --fixed-command-yaw-rate 0.0
-```
-
-NSC diagnostic:
-
-```bash
-python diagnose_policy.py runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx -0.5 \
-  --fixed-command-vz 0.0 \
-  --fixed-command-yaw-rate 0.0 \
-  --episodes 1 \
-  --max-steps 1000 \
-  --out diagnostics/default_forward_eval \
-  --log-every-step
-```
-
-SCM diagnostic:
-
-```bash
-python diagnose_policy.py \
-  --env-backend scm \
-  runs/default_baseline/checkpoints/default_baseline.zip \
-  --fixed-command-vx -0.5 \
-  --fixed-command-vz 0.0 \
-  --fixed-command-yaw-rate 0.0 \
-  --episodes 1 \
-  --max-steps 1000 \
-  --out diagnostics/default_scm_forward_eval \
-  --log-every-step
-```
-
-`<!-- Optional diagnostic visualization -->`
 
 ## Documentation
 
